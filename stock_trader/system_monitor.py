@@ -19,16 +19,16 @@ def get_system_metrics():
     mem = psutil.virtual_memory()
     mem_usage_pct = mem.percent
     
-    # 3. Battery Info (시스템 권한에 따라 확인 불가할 수 있음)
-    battery_level = "확인불가"
-    try:
-        # 타임아웃을 짧게 주어 루프가 멈추는 것 방지
-        res = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=1)
-        if res.returncode == 0:
-            batt_data = json.loads(res.stdout)
-            battery_level = f"{batt_data.get('percentage', '확인불가')}%"
-    except:
-        pass
+    # 3. Battery Info (시스템 권한 및 PRoot 환경 이슈로 비활성화)
+    battery_level = "N/A"
+    # try:
+    #     # 타임아웃을 짧게 주어 루프가 멈추는 것 방지
+    #     res = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=1)
+    #     if res.returncode == 0:
+    #         batt_data = json.loads(res.stdout)
+    #         battery_level = f"{batt_data.get('percentage', '확인불가')}%"
+    # except:
+    #     pass
 
     # 4. Temperature (CPU 온도 시도)
     cpu_temp = "N/A"

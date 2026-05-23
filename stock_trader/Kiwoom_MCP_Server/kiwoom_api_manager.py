@@ -16,8 +16,8 @@ class KiwoomApiManager:
             headers={"Content-Type": "application/json;charset=UTF-8"},
             body={
                 "grant_type": "client_credentials",
-                "appkey": self.config.kiwoom_app_key,
-                "secretkey": self.config.kiwoom_app_secret,
+                "appkey": self.config.app_key,
+                "secretkey": self.config.app_secret,
             },
         )
         if res_json and "token" in res_json:
@@ -31,8 +31,8 @@ class KiwoomApiManager:
             return []
         headers = {
             "authorization": f"Bearer {self.access_token}",
-            "appkey": self.config.kiwoom_app_key,
-            "appsecret": self.config.kiwoom_app_secret,
+            "appkey": self.config.app_key,
+            "appsecret": self.config.app_secret,
             "api-id": "ka10099",
         }
         body = {"mrkt_tp": "0"}
@@ -47,8 +47,8 @@ class KiwoomApiManager:
             return None
         headers = {
             "authorization": f"Bearer {self.access_token}",
-            "appkey": self.config.kiwoom_app_key,
-            "appsecret": self.config.kiwoom_app_secret,
+            "appkey": self.config.app_key,
+            "appsecret": self.config.app_secret,
             "api-id": "ka10001",
         }
         body = {"stk_cd": ticker}
@@ -69,8 +69,8 @@ class KiwoomApiManager:
 
         headers = {
             "authorization": f"Bearer {self.access_token}",
-            "appkey": self.config.kiwoom_app_key,
-            "appsecret": self.config.kiwoom_app_secret,
+            "appkey": self.config.app_key,
+            "appsecret": self.config.app_secret,
             "api-id": "ka10081",
         }
         body = {"stk_cd": ticker, "base_dt": start_date, "upd_stkpc_tp": "1"}
@@ -78,7 +78,6 @@ class KiwoomApiManager:
             path="/api/dostk/chart", headers=headers, body=body
         )
 
-        # API 응답 오류 코드 확인 로직 추가
         if res_json and res_json.get("return_code") == 0:
             return res_json.get("stk_dt_pole_chart_qry", [])
         else:
@@ -92,7 +91,7 @@ class KiwoomApiManager:
                 res = requests.post(url, headers=headers, json=body, timeout=10)
             else:
                 res = requests.get(url, headers=headers, params=params, timeout=10)
-            time.sleep(1)  # API 과부하 방지를 위해 요청 간격 조절
+            time.sleep(1)
             res.raise_for_status()
             return res.json()
         except requests.exceptions.RequestException as e:
@@ -106,16 +105,15 @@ class KiwoomApiManager:
 
         headers = {
             "authorization": f"Bearer {self.access_token}",
-            "appkey": self.config.kiwoom_app_key,
-            "appsecret": self.config.kiwoom_app_secret,
+            "appkey": self.config.app_key,
+            "appsecret": self.config.app_secret,
             "api-id": "ka10018",
         }
-        # 당일 전체 체결 내역 조회 파라미터
         body = {
             "acc_no": account_no,
-            "pw": "", # 비밀번호 비워둠
-            "qry_tp": "2", # 2: 체결/미체결 전체
-            "stk_cd": "" # 공백이면 전체 종목
+            "pw": "",
+            "qry_tp": "2",
+            "stk_cd": ""
         }
         res_json = self._request_api(
             path="/api/dostk/order_list", headers=headers, body=body

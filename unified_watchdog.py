@@ -40,6 +40,7 @@ def run_watchdog():
     
     # 프로세스 객체 보관용
     running_procs = {}
+    last_strategy_run = None
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -52,6 +53,22 @@ def run_watchdog():
     env["PYTHONPATH"] = ":".join(system_paths)
 
     while True:
+        now = datetime.now(KST)
+        
+        # [스케줄링] 전략 엔진 실행 (매일 08:30:00 ~ 08:30:30 사이 한 번만)
+        if now.hour == 8 and now.minute == 30:
+            today_str = now.strftime("%Y-%m-%d")
+            if last_strategy_run != today_str:
+                log("📅 [Schedule] 전략 엔진 자동 실행 시간 (08:30)")
+                strategy_path = os.path.join(BASE_DIR, "stock_trader/strategy_engine.py")
+                try:
+                    subprocess.run([VENV_PYTHON, strategy_path], env=env, check=True)
+                    log("✨ [Schedule] 전략 엔진 실행 완료")
+                    last_strategy_run = today_str
+                    send_telegram_message("🤖 [전략] 오늘 자 전략 종목 선정이 완료되었습니다.")
+                except Exception as e:
+                    log(f"❌ [Schedule] 전략 엔진 실행 실패: {e}")
+
         for p_info in PROCESSES:
             p_path = p_info["path"]
             p_name = p_info["name"]
