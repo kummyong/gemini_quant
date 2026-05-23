@@ -10,9 +10,7 @@ import pytz
 KST = pytz.timezone('Asia/Seoul')
 
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
+from config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR
 
 # 중복 실행 방지 (Lock File)
 LOCK_FILE = os.path.join(LOG_DIR, "system_monitor.lock")

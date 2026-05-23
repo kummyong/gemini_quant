@@ -7,8 +7,7 @@ import pytz
 from datetime import datetime
 
 # 1. 경로 및 시간 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-DB_PATH = os.path.join(BASE_DIR, "logs/system_monitor.db")
+from config import STOCK_TRADER_DIR as BASE_DIR, DB_PATH
 KST = pytz.timezone('Asia/Seoul')
 
 # 2. 로깅 (KST 시간대 적용)

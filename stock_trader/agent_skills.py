@@ -10,16 +10,10 @@ from datetime import datetime
 KST = pytz.timezone('Asia/Seoul')
 ...
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
+from config import STOCK_TRADER_DIR as BASE_DIR, SECRETARY_DIR, DB_PATH
 sys.path.append(BASE_DIR)
 sys.path.append(os.path.join(BASE_DIR, "Kiwoom_MCP_Server"))
-
-# Secretary 경로 추가
-SECRETARY_DIR = "/root/workspace/gemini-quant/secretary"
 sys.path.append(SECRETARY_DIR)
-
-# DB 경로
-DB_PATH = os.path.join(BASE_DIR, "logs/system_monitor.db")
 
 # 모듈 임포트 시도
 try:

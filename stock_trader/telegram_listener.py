@@ -1,10 +1,10 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time
 import json
 import threading
-import fcntl
 import requests
 import re
 import sqlite3
@@ -12,11 +12,8 @@ from datetime import datetime
 import pytz
 
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
+from config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH
 sys.path.append(BASE_DIR)
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
-DB_PATH = os.path.join(LOG_DIR, "system_monitor.db")
 
 from telegram_utils import TOKEN, CHAT_ID
 from local_intent_router import get_local_decision, get_top_n_decisions, router
@@ -32,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "telegram_listener.log"), encoding='utf-8'),
+        RotatingFileHandler(os.path.join(LOG_DIR, "telegram_listener.log"), maxBytes=2*1024*1024, backupCount=2, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -86,11 +83,10 @@ def judge_feedback(text):
 
 def get_local_db_best_match(text):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT raw_text, actual_label FROM training_data ORDER BY created_at DESC LIMIT 100")
-        rows = cursor.fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT raw_text, actual_label FROM training_data ORDER BY created_at DESC LIMIT 100")
+            rows = cursor.fetchall()
         best_intent, max_overlap = None, 0
         for raw_text, label in rows:
             overlap = len(set(text) & set(raw_text))

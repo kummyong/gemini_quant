@@ -6,8 +6,7 @@ import sys
 from datetime import datetime, timedelta
 from telegram_utils import send_telegram_photo
 
-DB_PATH = "/root/workspace/gemini-quant/stock_trader/logs/system_monitor.db"
-LOG_DIR = "/root/workspace/gemini-quant/stock_trader/logs"
+from config import DB_PATH, LOG_DIR
 
 def generate_trend_report(range_type="1h"):
     if not os.path.exists(DB_PATH):
@@ -93,8 +92,8 @@ def generate_trend_report(range_type="1h"):
             plt.gcf().autofmt_xdate()
         
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close()
+        plt.savefig(output_path, dpi=100)
+        plt.close('all')
         
         return output_path, summary_text, None
 

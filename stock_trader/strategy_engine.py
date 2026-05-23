@@ -56,15 +56,8 @@ class StrategyEngine:
     TRAILING_STOP_DROP = 3.0       # 최고 수익률 대비 하락폭 익절선 (3.0%p)
     HARD_STOP_LOSS = -5.0          # 개별 및 글로벌 절대 손절선 (-5.0%)
 
-    SAMPLE_DATA = [
-        ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"),
-        ("035420", "NAVER"), ("035720", "카카오"), ("000270", "기아"),
-        ("005490", "POSCO홀딩스"), ("105560", "KB금융"), ("068270", "셀트리온"),
-        ("000810", "삼성화재"), ("051910", "LG화학"), ("032830", "삼성생명"),
-        ("015760", "한국전력"), ("033780", "KT&G"), ("003550", "LG"),
-        ("000100", "유한양행"), ("000700", "유수홀딩스"), ("017940", "E1"),
-        ("277810", "레인보우로보틱스"), ("465770", "STX그린로지스")
-    ]
+    from stock_universe import SAMPLE_TICKERS
+    SAMPLE_DATA = SAMPLE_TICKERS
 
     def __init__(self):
         logger.info("중장기 전략 엔진(Strategy Engine) 초기화 중...")
@@ -130,7 +123,8 @@ class StrategyEngine:
             total=3,
             backoff_factor=1.0,
             status_forcelist=[500, 502, 503, 504],
-            raise_on_status=False
+            raise_on_status=False,
+            allowed_methods=["GET", "POST"]
         )
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount('http://', adapter)

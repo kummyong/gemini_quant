@@ -9,7 +9,7 @@ from telegram_utils import send_telegram_message
 # 한국 시간(KST) 설정 (UTC+9)
 KST = timezone(timedelta(hours=9))
 
-DB_PATH = "/root/workspace/gemini-quant/stock_trader/logs/system_monitor.db"
+from config import DB_PATH
 
 def get_system_metrics():
     # 1. CPU Percent (인터벌을 늘려 정확도 향상)
@@ -62,32 +62,31 @@ def get_system_metrics():
 
 def save_to_db(metrics):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # 테이블 컬럼 추가 여부 확인 후 저장
-        cursor.execute("PRAGMA table_info(system_metrics)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        # 필요한 컬럼이 없으면 추가 (배터리, 온도 등)
-        if "cpu_usage" not in columns:
-            cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_usage REAL")
-        if "battery_level" not in columns:
-            cursor.execute("ALTER TABLE system_metrics ADD COLUMN battery_level TEXT")
-        if "cpu_temp" not in columns:
-            cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_temp TEXT")
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            # 테이블 컬럼 추가 여부 확인 후 저장
+            cursor.execute("PRAGMA table_info(system_metrics)")
+            columns = [column[1] for column in cursor.fetchall()]
             
-        cursor.execute("""
-            INSERT INTO system_metrics (
-                timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp,
-                mem_total_kb, mem_used_kb, mem_available_kb, mem_usage_pct
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            metrics["timestamp"], metrics["cpu_load_1m"], metrics["cpu_usage"], 
-            str(metrics["battery_level"]), str(metrics["cpu_temp"]),
-            metrics["mem_total_kb"], metrics["mem_used_kb"], metrics["mem_available_kb"], metrics["mem_usage_pct"]
-        ))
-        conn.commit()
-        conn.close()
+            # 필요한 컬럼이 없으면 추가 (배터리, 온도 등)
+            if "cpu_usage" not in columns:
+                cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_usage REAL")
+            if "battery_level" not in columns:
+                cursor.execute("ALTER TABLE system_metrics ADD COLUMN battery_level TEXT")
+            if "cpu_temp" not in columns:
+                cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_temp TEXT")
+                
+            cursor.execute("""
+                INSERT INTO system_metrics (
+                    timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp,
+                    mem_total_kb, mem_used_kb, mem_available_kb, mem_usage_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                metrics["timestamp"], metrics["cpu_load_1m"], metrics["cpu_usage"], 
+                str(metrics["battery_level"]), str(metrics["cpu_temp"]),
+                metrics["mem_total_kb"], metrics["mem_used_kb"], metrics["mem_available_kb"], metrics["mem_usage_pct"]
+            ))
+            conn.commit()
         return True
     except Exception as e:
         print(f"❌ [DB] 저장 오류: {e}")

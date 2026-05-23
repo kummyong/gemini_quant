@@ -7,8 +7,7 @@ from sklearn.pipeline import Pipeline
 import numpy as np
 
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-MODEL_PATH = os.path.join(BASE_DIR, "logs/intent_model.pkl")
+from config import MODEL_PATH
 
 # 초기 학습 데이터 (함수 호출 매핑)
 # 라벨: get_account_summary, get_balance, place_order, search_history, get_system_status, get_stock_price, switch_ai_model
@@ -2490,16 +2489,9 @@ TRAIN_DATA = [
 class LocalIntentRouter:
     def __init__(self):
         self.model = None
-        # 간단한 종목 매핑 (학습 데이터 대용)
-        self.stock_dict = {
-            "삼성전자": "005930", "삼성": "005930", 
-            "SK하이닉스": "000660", "하이닉스": "000660", 
-            "현대차": "005380", "현대자동차": "005380",
-            "진에어": "272450", "대한항공": "003490", "아시아나": "020560",
-            "카카오": "035720", "네이버": "035420", "NAVER": "035420",
-            "에코프로": "086520", "에코프로비엠": "247540",
-            "셀트리온": "068270", "한미반도체": "042700", "엔비디아": "NVDA"
-        }
+        # 통합 종목 매핑 사전 사용
+        from stock_universe import STOCK_MAP
+        self.stock_dict = STOCK_MAP
         self._initialize_model()
 
     def _initialize_model(self):

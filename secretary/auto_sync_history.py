@@ -2,6 +2,7 @@ import time
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 import fcntl
 import pytz
 from datetime import datetime
@@ -12,8 +13,16 @@ KST = pytz.timezone('Asia/Seoul')
 def kst_converter(*args):
     return datetime.now(KST).timetuple()
 
+# config.py 임포트를 위해 stock_trader 경로 추가
+current_dir = os.path.dirname(os.path.abspath(__file__))
+stock_trader_dir = os.path.join(os.path.dirname(current_dir), "stock_trader")
+if stock_trader_dir not in sys.path:
+    sys.path.insert(0, stock_trader_dir)
+
 # 중복 실행 방지 (Lock File)
-LOCK_FILE = "/root/workspace/gemini-quant/stock_trader/logs/auto_sync_history.lock"
+from config import LOG_DIR, SECRETARY_DIR
+
+LOCK_FILE = os.path.join(LOG_DIR, "auto_sync_history.lock")
 fp = open(LOCK_FILE, 'w')
 try:
     fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -22,7 +31,7 @@ except IOError:
     sys.exit(0)
 
 # 기존 save_history 기능을 활용하기 위해 경로 추가
-BASE_DIR = "/root/workspace/gemini-quant/secretary"
+BASE_DIR = SECRETARY_DIR
 sys.path.append(BASE_DIR)
 
 try:
@@ -32,11 +41,11 @@ except ImportError:
     sys.exit(1)
 
 # 로그 설정 (KST 적용)
-LOG_FILE = "/root/workspace/gemini-quant/stock_trader/logs/auto_sync_history.log"
+LOG_FILE = os.path.join(LOG_DIR, "auto_sync_history.log")
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 formatter.converter = kst_converter
 
-file_handler = logging.FileHandler(LOG_FILE)
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2*1024*1024, backupCount=2)
 file_handler.setFormatter(formatter)
 
 stream_handler = logging.StreamHandler(sys.stdout)

@@ -1,5 +1,5 @@
 #!/bin/bash
-BASE_DIR="/root/workspace/gemini-quant"
+BASE_DIR="$(dirname "$(realpath "$0")")"
 LOG_DIR="$BASE_DIR/stock_trader/logs"
 
 mkdir -p $LOG_DIR
