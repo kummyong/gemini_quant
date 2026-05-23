@@ -20,7 +20,7 @@ DB_PATH = os.path.join(LOG_DIR, "system_monitor.db")
 
 from telegram_utils import TOKEN, CHAT_ID
 from local_intent_router import get_local_decision, get_top_n_decisions, router
-from agent_skills import skill_router, save_training_feedback
+from agent_skills import skill_router, save_training_feedback, SYSTEM_TOOLS
 from trainer import retrain_model
 
 # 타임존 및 로깅 설정
@@ -158,6 +158,9 @@ def get_ai_teacher_decision(text):
                 return fn["name"], fn.get("args", {}), 1.0
     except: pass
     return None, {}, 0
+
+# Alias for compatibility with test suite
+get_intent_robust = get_ai_teacher_decision
 
 def process_and_reply(text: str):
     global last_interaction

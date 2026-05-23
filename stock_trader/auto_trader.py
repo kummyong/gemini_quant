@@ -33,17 +33,18 @@ def run_trade():
             # 장중 시간 (09:00 ~ 15:30)
             if now.weekday() < 5 and (9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30)):
                 # 1. 매매 신호 로드
-                with sqlite3.connect(DB_PATH) as conn:
+                with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
-                    cursor.execute("SELECT ticker, name, action, reason FROM trade_signals WHERE status = 'PENDING'")
+                    cursor.execute("SELECT ticker, name, action, quantity, reason FROM trade_signals WHERE status = 'PENDING'")
                     signals = cursor.fetchall()
                 
                 if signals:
                     logger.info(f"🧠 {len(signals)}개의 매매 신호 처리 시작")
                     for sig in signals:
-                        logger.info(f"🛒 주문 요청: {sig['name']} ({sig['ticker']})")
-                        res = api.place_order(sig['ticker'], 1, 0, side=sig['action'])
+                        qty = int(sig['quantity']) if sig.get('quantity') and int(sig['quantity']) > 0 else 1
+                        logger.info(f"🛒 주문 요청: {sig['name']} ({sig['ticker']}) - 수량: {qty}주")
+                        res = api.place_order(sig['ticker'], qty, 0, side=sig['action'])
                         
                         logger.info(f"📡 API 응답: {res}")
                         
@@ -58,10 +59,10 @@ def run_trade():
                             logger.info(f"✅ 주문 성공 판정: {sig['name']}")
                             # DB 기록
                             try:
-                                with sqlite3.connect(DB_PATH) as conn:
+                                with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
                                     conn.execute("UPDATE trade_signals SET status = 'DONE' WHERE ticker = ?", (sig['ticker'],))
                                     conn.execute("INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                                 (sig['ticker'], sig['name'], sig['action'], 1, 0, 0, sig['reason']))
+                                                 (sig['ticker'], sig['name'], sig['action'], qty, 0, 0, sig['reason']))
                                     conn.commit()
                                 logger.info(f"✅ DB 기록 완료: {sig['name']}")
                             except Exception as db_e:
