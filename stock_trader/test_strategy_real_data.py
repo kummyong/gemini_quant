@@ -2,10 +2,11 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import sys
+import sqlite3
 
 # Add directory to sys.path to import strategy_engine
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from strategy_engine import StrategyEngine
+from strategy_engine import StrategyEngine, DB_PATH as ORIGINAL_DB_PATH
 
 class TestStrategyEngineRealData(unittest.TestCase):
     def setUp(self):
@@ -14,7 +15,11 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.mock_sleep = self.sleep_patcher.start()
         
         # We patch the database path to a test database under logs
-        self.db_patcher = patch('strategy_engine.DB_PATH', os.path.join(os.path.dirname(__file__), 'logs', 'test_system_monitor.db'))
+        self.test_db_dir = os.path.join(os.path.dirname(__file__), 'logs')
+        if not os.path.exists(self.test_db_dir):
+            os.makedirs(self.test_db_dir)
+        self.test_db_path = os.path.join(self.test_db_dir, 'test_system_monitor.db')
+        self.db_patcher = patch('strategy_engine.DB_PATH', self.test_db_path)
         self.mock_db = self.db_patcher.start()
         
         self.engine = StrategyEngine()
@@ -24,14 +29,13 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.db_patcher.stop()
         
         # Clean up test database if it exists
-        test_db = os.path.join(os.path.dirname(__file__), 'logs', 'test_system_monitor.db')
-        if os.path.exists(test_db):
+        if os.path.exists(self.test_db_path):
             try:
-                os.remove(test_db)
+                os.remove(self.test_db_path)
             except Exception:
                 pass
 
-    @patch('requests.get')
+    @patch('requests.Session.get')
     def test_get_industry_map_mock(self, mock_get):
         # Mock HTML response for industry sectors
         mock_html = """
@@ -54,7 +58,7 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.assertEqual(ind_map.get("반도체와반도체장비"), -1.20)
         self.assertNotIn("바이오", ind_map)
 
-    @patch('requests.get')
+    @patch('requests.Session.get')
     def test_fetch_market_data_mock(self, mock_get):
         # Mock HTML responses
         # 1. Industry mapping request
@@ -125,6 +129,124 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.assertAlmostEqual(scored[1]["total_score"], 49.11)
         self.assertEqual(scored[2]["ticker"], "A")
         self.assertAlmostEqual(scored[2]["total_score"], 15.0)
+
+    def test_trailing_stop_logic(self):
+        # 1. 고점이 +3.0% 였고, 현재 수익률이 0.0%인 경우 (3.0%p 이상 하락) -> Trailing Stop 매도 작동 검증
+        current_holdings = [
+            {
+                "ticker": "005930",
+                "name": "삼성전자",
+                "profit_rate": 0.0,
+                "quantity": 100,
+                "purchase_price": 70000.0,
+                "current_price": 70000.0,
+                "max_profit_rate": 3.0
+            }
+        ]
+        top_tickers = []
+        sell_signals = self.engine.generate_management_signals(current_holdings, top_tickers)
+        self.assertEqual(len(sell_signals), 1)
+        self.assertEqual(sell_signals[0]["ticker"], "005930")
+        self.assertEqual(sell_signals[0]["action"], "SELL")
+        self.assertTrue("Trailing Stop" in sell_signals[0]["reason"])
+
+        # 2. 고점이 +1.5% 였고, 현재 수익률이 -1.5%인 경우 (3.0%p 하락했으나 고점이 +2.0% 미만) -> Trailing Stop 작동하지 않음
+        current_holdings = [
+            {
+                "ticker": "005930",
+                "name": "삼성전자",
+                "profit_rate": -1.5,
+                "quantity": 100,
+                "purchase_price": 70000.0,
+                "current_price": 68950.0,
+                "max_profit_rate": 1.5
+            }
+        ]
+        sell_signals = self.engine.generate_management_signals(current_holdings, ["005930"])
+        self.assertEqual(len(sell_signals), 0)
+
+    def test_hard_stop_loss_logic(self):
+        # 개별 종목의 수익률이 -5.5% 인 경우 -> Hard Stop Loss 작동 검증
+        current_holdings = [
+            {
+                "ticker": "000660",
+                "name": "SK하이닉스",
+                "profit_rate": -5.5,
+                "quantity": 50,
+                "purchase_price": 180000.0,
+                "current_price": 170100.0,
+                "max_profit_rate": 0.0
+            }
+        ]
+        top_tickers = ["000660"]
+        sell_signals = self.engine.generate_management_signals(current_holdings, top_tickers)
+        self.assertEqual(len(sell_signals), 1)
+        self.assertEqual(sell_signals[0]["ticker"], "000660")
+        self.assertEqual(sell_signals[0]["action"], "SELL")
+        self.assertTrue("Hard Stop Loss" in sell_signals[0]["reason"])
+
+    def test_global_portfolio_stop_loss(self):
+        # 포트폴리오 전체 평가 손실률이 -5.0% 이하인 경우 -> 전체 종목 강제 청산(Global Hard Stop) 검증
+        current_holdings = [
+            {
+                "ticker": "005930",
+                "name": "삼성전자",
+                "profit_rate": -3.0,
+                "quantity": 100,
+                "purchase_price": 70000.0,
+                "current_price": 67900.0,
+                "max_profit_rate": 0.0
+            },
+            {
+                "ticker": "000660",
+                "name": "SK하이닉스",
+                "profit_rate": -7.0,
+                "quantity": 50,
+                "purchase_price": 180000.0,
+                "current_price": 167400.0,
+                "max_profit_rate": 0.0
+            }
+        ]
+        # 전체 매입액: 70,000 * 100 + 180,000 * 50 = 7,000,000 + 9,000,000 = 16,000,000 원
+        # 전체 평가액: 67,900 * 100 + 167,400 * 50 = 6,790,000 + 8,370,000 = 15,160,000 원
+        # 손실률: (15,160,000 - 16,000,000) / 16,000,000 = -840,000 / 16,000,000 = -5.25% (<= -5.0%)
+        top_tickers = ["005930", "000660"]
+        sell_signals = self.engine.generate_management_signals(current_holdings, top_tickers)
+        self.assertEqual(len(sell_signals), 2)
+        tickers = {s["ticker"] for s in sell_signals}
+        self.assertEqual(tickers, {"005930", "000660"})
+        for s in sell_signals:
+            self.assertEqual(s["action"], "SELL")
+            self.assertTrue("계좌 전체 Hard Stop Loss 작동" in s["reason"])
+
+    def test_position_sizing_calculation(self):
+        # 100억 가상 자산 기준, 종목 비중 10% 일 때, 현재가에 따라 수량이 정확하게 계산되는지 확인
+        # 종목당 배정 금액 = 100억 * 10% = 10억 원 (1,000,000,000 원)
+        # 1. 50,000원 주식의 경우 -> 1,000,000,000 / 50,000 = 20,000 주
+        # 2. 75,000원 주식의 경우 -> 1,000,000,000 / 75,000 = 13,333 주
+        
+        # mock top_5 종목 리스트
+        top_5 = [
+            {"ticker": "005930", "name": "삼성전자", "price": 50000.0, "total_score": 85.0},
+            {"ticker": "000660", "name": "SK하이닉스", "price": 75000.0, "total_score": 80.0}
+        ]
+        
+        # holdings 및 sell_signals가 없는 상태에서 run()의 매수 로직을 부분 시뮬레이션
+        buy_signals = []
+        for s in top_5:
+            price = s["price"]
+            target_amt = self.engine.TOTAL_EQUITY * self.engine.TARGET_WEIGHT
+            quantity = int(target_amt / price)
+            buy_signals.append({
+                "ticker": s["ticker"],
+                "name": s["name"],
+                "quantity": quantity
+            })
+            
+        self.assertEqual(buy_signals[0]["ticker"], "005930")
+        self.assertEqual(buy_signals[0]["quantity"], 20000)
+        self.assertEqual(buy_signals[1]["ticker"], "000660")
+        self.assertEqual(buy_signals[1]["quantity"], 13333)
 
     def test_live_fetch_single_stock(self):
         """Integration test on a single live stock (Samsung Electronics)"""
