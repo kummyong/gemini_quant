@@ -162,7 +162,9 @@ def handle_system_update(text: str) -> str:
     """[SYSTEM_UPDATE] 메시지를 파싱하여 DB를 업데이트하고 성공 결과를 반환합니다."""
     logger.info("[System Update] 파라미터 업데이트 요청 수신")
     try:
-        content = text[len("[SYSTEM_UPDATE]"):].strip()
+        import re
+        # 대소문자, 언더바/공백 무관하게 매칭 후 이후의 텍스트만 추출
+        content = re.sub(r'(?i).*system[_ ]?update\]?', '', text).strip()
         # 정규표현식으로 Key=Value 패턴 추출
         pairs = re.findall(r'([A-Za-z0-9_]+)\s*=\s*([+-]?[0-9]*\.?[0-9]+)', content)
         if not pairs:
@@ -203,7 +205,7 @@ def process_and_reply(text: str):
     text_raw = text.strip()
     
     # [System Update] 파라미터 강제 업데이트 처리
-    if text_raw.startswith("[SYSTEM_UPDATE]"):
+    if "system" in text_raw.lower() and "update" in text_raw.lower():
         return handle_system_update(text_raw)
     
     # [0] 슬래시 명령어(/) 직접 처리
