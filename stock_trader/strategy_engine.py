@@ -144,10 +144,10 @@ class StrategyEngine:
             else:
                 raise ValueError("코스피 데이터가 부족합니다.")
         except Exception as e:
-            logger.error(f"❌ 국면 판독 실패 (기본 BULL 파라미터 적용): {e}")
-            self.current_regime = "BULL (Fallback)"
-            self.RSI_BUY_THRES = self.BULL_RSI
-            self.BB_STD = self.BULL_BB
+            logger.error(f"❌ 국면 판독 실패 (안전장치 발동: 보수적 BEAR 파라미터 적용): {e}")
+            self.current_regime = "BEAR (Fallback)"
+            self.RSI_BUY_THRES = self.BEAR_RSI
+            self.BB_STD = self.BEAR_BB
 
 
     def _init_dart(self):
