@@ -12,15 +12,6 @@ KST = pytz.timezone('Asia/Seoul')
 # 경로 설정
 from config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR
 
-# 중복 실행 방지 (Lock File)
-LOCK_FILE = os.path.join(LOG_DIR, "system_monitor.lock")
-fp = open(LOCK_FILE, 'w')
-try:
-    fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except IOError:
-    print("⚠️  System Monitor Loop is already running. Exiting...")
-    sys.exit(0)
-
 MONITOR_SCRIPT = os.path.join(BASE_DIR, "system_monitor.py")
 TREND_SCRIPT = os.path.join(BASE_DIR, "system_trend_reporter.py")
 
@@ -41,6 +32,15 @@ def run_trend_report(range_type="1h"):
         print(f"❌ {range_type} 트렌드 보고 에러: {e}")
 
 if __name__ == "__main__":
+    # 중복 실행 방지 (Lock File)
+    LOCK_FILE = os.path.join(LOG_DIR, "system_monitor.lock")
+    fp = open(LOCK_FILE, 'w')
+    try:
+        fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("⚠️  System Monitor Loop is already running. Exiting...")
+        sys.exit(0)
+
     print(f"🚀 [System Monitor Loop v5] 시작됨 (KST 기준: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')})")
     print(" - 매분 정각: 수집")
     print(" - 매시 정각: 1시간 트렌드 보고")

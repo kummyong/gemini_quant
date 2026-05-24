@@ -19,16 +19,7 @@ stock_trader_dir = os.path.join(os.path.dirname(current_dir), "stock_trader")
 if stock_trader_dir not in sys.path:
     sys.path.insert(0, stock_trader_dir)
 
-# 중복 실행 방지 (Lock File)
-from config import LOG_DIR, SECRETARY_DIR
-
-LOCK_FILE = os.path.join(LOG_DIR, "auto_sync_history.lock")
-fp = open(LOCK_FILE, 'w')
-try:
-    fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except IOError:
-    print("⚠️  Auto Sync History is already running. Exiting...")
-    sys.exit(0)
+from config import SECRETARY_DIR, LOG_DIR
 
 # 기존 save_history 기능을 활용하기 위해 경로 추가
 BASE_DIR = SECRETARY_DIR
@@ -71,6 +62,15 @@ def main():
         time.sleep(600)
 
 if __name__ == "__main__":
+    # 중복 실행 방지 (Lock File)
+    LOCK_FILE = os.path.join(LOG_DIR, "auto_sync_history.lock")
+    fp = open(LOCK_FILE, 'w')
+    try:
+        fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("⚠️  Auto Sync History is already running. Exiting...")
+        sys.exit(0)
+
     # 백그라운드 실행 시 stdout 버퍼링 해제
     os.environ['PYTHONUNBUFFERED'] = '1'
     main()
