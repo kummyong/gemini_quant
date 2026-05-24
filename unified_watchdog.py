@@ -42,6 +42,8 @@ def run_watchdog():
     running_procs = {}
     last_strategy_run = None
     last_summary_run = None
+    last_dart_check_minute = -1  # DART 공시 감시 마지막 실행 시각 (분 단위)
+    last_universe_expand = None  # 유니버스 확장 마지막 실행 월
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -88,6 +90,32 @@ def run_watchdog():
                     log("✨ [Schedule] 일일 마감 보고 전송 완료")
                 except Exception as e:
                     log(f"❌ [Schedule] 일일 마감 보고 전송 실패: {e}")
+
+        # [스케줄링] DART 공시 감시 (장중 매 30분 간격: 09:00, 09:30, 10:00, ..., 15:00)
+        if now.weekday() < 5 and 9 <= now.hour < 16:
+            current_check_minute = now.hour * 60 + (now.minute // 30) * 30  # 30분 단위로 정규화
+            if current_check_minute != last_dart_check_minute:
+                log("📡 [Schedule] DART 공시 감시 실행")
+                dart_monitor_path = os.path.join(BASE_DIR, "stock_trader/dart_disclosure_monitor.py")
+                try:
+                    subprocess.run([VENV_PYTHON, dart_monitor_path], env=env, check=True, timeout=120)
+                    last_dart_check_minute = current_check_minute
+                    log("✅ [Schedule] DART 공시 감시 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] DART 공시 감시 실패: {e}")
+                    
+        # [스케줄링] 유니버스 자동 확장 (매월 1일 08:00)
+        if now.day == 1 and now.hour == 8 and now.minute < 1:
+            current_month = now.strftime("%Y-%m")
+            if last_universe_expand != current_month:
+                log("📋 [Schedule] DART 기반 유니버스 확장 실행")
+                expander_path = os.path.join(BASE_DIR, "stock_trader/dart_universe_expander.py")
+                try:
+                    subprocess.run([VENV_PYTHON, expander_path], env=env, check=True, timeout=600)
+                    last_universe_expand = current_month
+                    log("✅ [Schedule] 유니버스 확장 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] 유니버스 확장 실패: {e}")
 
         for p_info in PROCESSES:
             p_path = p_info["path"]

@@ -13,7 +13,8 @@ from bs4 import BeautifulSoup
 import re
 import time
 from telegram_utils import send_telegram_message
-
+from dart_api import DartAPI
+from dart_financial_scorer import DartFinancialScorer
 
 # [설정] 경로 및 하이퍼파라미터
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,10 +22,17 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 DB_PATH = os.path.join(LOG_DIR, "system_monitor.db")
 LOG_PATH = os.path.join(LOG_DIR, "strategy_engine.log")
 
-# 가중치 설정 (합계 1.0)
-WEIGHT_EARNINGS = 0.4      # 실적 모멘텀
-WEIGHT_MACRO = 0.3         # 산업 트렌드/매크로
-WEIGHT_INSTITUTIONAL = 0.3  # 수급(기관/외인)
+# ── 기존 팩터 가중치 (네이버 금융 기반) ──
+WEIGHT_EARNINGS = 0.15       # 기존 EPS 성장률 (네이버 금융)
+WEIGHT_MACRO = 0.20          # 산업 트렌드/매크로
+
+# ── DART 팩터 가중치 (공시 재무제표 기반) ──
+WEIGHT_DART_REVENUE = 0.15   # DART: 매출 성장률
+WEIGHT_DART_OP_PROFIT = 0.20 # DART: 영업이익 성장률
+WEIGHT_DART_HEALTH = 0.05    # DART: 재무건전성 (부채비율/현금흐름)
+WEIGHT_INSTITUTIONAL = 0.25  # 수급(기관/외인) — 대량보유 보너스 포함
+
+# 합계: 0.15 + 0.20 + 0.15 + 0.20 + 0.05 + 0.25 = 1.00
 
 # 로깅 설정 (KST 시간대 적용 및 RotatingFileHandler 파일 회전 적용)
 def kst_converter(*args):
@@ -65,6 +73,18 @@ class StrategyEngine:
         logger.info("중장기 전략 엔진(Strategy Engine) 초기화 중...")
         self._init_db()
         self._init_session()
+        self._init_dart()
+
+    def _init_dart(self):
+        """DART API 및 재무 점수 계산기 초기화"""
+        try:
+            self.dart_api = DartAPI()
+            self.dart_scorer = DartFinancialScorer(self.dart_api)
+            logger.info("✅ DART API 및 재무 분석기 초기화 완료")
+        except Exception as e:
+            logger.error(f"⚠️ DART 초기화 실패 (기존 네이버 데이터로 대체 운영): {e}")
+            self.dart_api = None
+            self.dart_scorer = None
 
     def _init_db(self):
         """데이터베이스 및 테이블 초기화 및 스키마 자동 마이그레이션"""
@@ -276,13 +296,47 @@ class StrategyEngine:
             except Exception as e:
                 logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
                 
+            # ──── DART 데이터 조회 ────
+            dart_revenue_growth = 0.0
+            dart_op_growth = 0.0
+            dart_debt_ratio = 100.0
+            dart_cf_quality = 50.0
+            dart_dividend_yield = 0.0
+            dart_major_shareholder_bonus = 0.0
+            dart_available = False
+            
+            if self.dart_scorer:
+                try:
+                    fin_score = self.dart_scorer.get_financial_score(ticker)
+                    dart_revenue_growth = fin_score["revenue_growth"]
+                    dart_op_growth = fin_score["op_profit_growth"]
+                    dart_debt_ratio = fin_score["debt_ratio"]
+                    dart_cf_quality = fin_score["cash_flow_quality"]
+                    dart_available = fin_score["dart_available"]
+                    
+                    dart_dividend_yield = self.dart_scorer.get_dividend_yield(ticker)
+                    dart_major_shareholder_bonus = self.dart_scorer.get_major_shareholder_signal(ticker)
+                    
+                    # DART API 호출 간 0.3초 대기 (일일 10,000회 한도 준수)
+                    time.sleep(0.3)
+                except Exception as dart_e:
+                    logger.warning(f"[{name}] DART 데이터 조회 실패 (무시): {dart_e}")
+            
             real_stocks.append({
                 "ticker": ticker,
                 "name": name,
                 "eps_growth": eps_growth,
                 "industry_score": industry_score,
                 "net_buying": net_buying,
-                "price": current_price
+                "price": current_price,
+                # DART 추가 데이터
+                "dart_revenue_growth": dart_revenue_growth,
+                "dart_op_growth": dart_op_growth,
+                "dart_debt_ratio": dart_debt_ratio,
+                "dart_cf_quality": dart_cf_quality,
+                "dart_dividend_yield": dart_dividend_yield,
+                "dart_major_shareholder_bonus": dart_major_shareholder_bonus,
+                "dart_available": dart_available
             })
             
             # API 요청 오남용 방지 및 IP 차단 방지를 위한 0.5초 정중한 대기
@@ -291,35 +345,78 @@ class StrategyEngine:
         return real_stocks
 
     def calculate_scores(self, stocks: List[Dict]) -> List[Dict]:
-        """멀티 팩터 점수 계산 및 랭킹 산출 (동적 Min-Max 정규화 적용)"""
-        logger.info("멀티 팩터 스코어 계산 시작...")
+        """멀티 팩터 점수 계산 (네이버 + DART 팩터 통합, 동적 Min-Max 정규화)"""
+        logger.info("멀티 팩터 스코어 계산 시작 (DART 팩터 통합)...")
         
         if not stocks:
             return []
-            
-        # 정규화를 위해 최대/최소값 파악
+        
+        # ── 정규화를 위한 최대/최소값 파악 ──
         eps_values = [s["eps_growth"] for s in stocks]
         net_values = [s["net_buying"] for s in stocks]
+        rev_values = [s.get("dart_revenue_growth", 0.0) for s in stocks]
+        op_values = [s.get("dart_op_growth", 0.0) for s in stocks]
         
         min_eps, max_eps = min(eps_values), max(eps_values)
         min_net, max_net = min(net_values), max(net_values)
+        min_rev, max_rev = min(rev_values), max(rev_values)
+        min_op, max_op = min(op_values), max(op_values)
         
         eps_range = max_eps - min_eps if max_eps != min_eps else 1.0
         net_range = max_net - min_net if max_net != min_net else 1.0
+        rev_range = max_rev - min_rev if max_rev != min_rev else 1.0
+        op_range = max_op - min_op if max_op != min_op else 1.0
         
         for stock in stocks:
-            # 1. 실적 모멘텀 동적 정규화 (0 ~ 100점)
-            s1 = ((stock["eps_growth"] - min_eps) / eps_range) * 100
+            # 1. 기존 실적 모멘텀 (네이버 EPS) — 정규화 0~100
+            s_eps = ((stock["eps_growth"] - min_eps) / eps_range) * 100
             
-            # 2. 산업 트렌드는 이미 업종 등락률 기반으로 20~95점으로 매핑되어 있음
-            s2 = stock["industry_score"]
+            # 2. 산업 트렌드 — 이미 20~95점 범위
+            s_macro = stock["industry_score"]
             
-            # 3. 수급 동적 정규화 (0 ~ 100점)
-            s3 = ((stock["net_buying"] - min_net) / net_range) * 100
-
-            final_score = (s1 * WEIGHT_EARNINGS) + (s2 * WEIGHT_MACRO) + (s3 * WEIGHT_INSTITUTIONAL)
+            # 3. DART 매출 성장률 — 정규화 0~100
+            s_rev = ((stock.get("dart_revenue_growth", 0.0) - min_rev) / rev_range) * 100
+            
+            # 4. DART 영업이익 성장률 — 정규화 0~100
+            s_op = ((stock.get("dart_op_growth", 0.0) - min_op) / op_range) * 100
+            
+            # 5. DART 재무건전성 점수 (부채비율 + 현금흐름 품질 종합)
+            #    부채비율이 낮을수록, 현금흐름 품질이 높을수록 점수가 높다
+            debt_score = max(0, 100 - stock.get("dart_debt_ratio", 100.0))  # 부채비율 100% → 0점, 0% → 100점
+            debt_score = min(100, debt_score)
+            health_score = (debt_score * 0.5 + stock.get("dart_cf_quality", 50.0) * 0.5)
+            
+            # 6. 수급 (기관/외인 순매수) — 정규화 0~100
+            s_net = ((stock["net_buying"] - min_net) / net_range) * 100
+            
+            # ── 최종 점수 산출 ──
+            final_score = (
+                s_eps * WEIGHT_EARNINGS +
+                s_macro * WEIGHT_MACRO +
+                s_rev * WEIGHT_DART_REVENUE +
+                s_op * WEIGHT_DART_OP_PROFIT +
+                health_score * WEIGHT_DART_HEALTH +
+                s_net * WEIGHT_INSTITUTIONAL
+            )
+            
+            # ── 보너스/패널티 적용 ──
+            
+            # 대량보유(5% 룰) 지분변동 보너스 (수급 팩터에 가산)
+            final_score += stock.get("dart_major_shareholder_bonus", 0.0)
+            
+            # 배당수익률 보너스 (3% 이상 시 최대 +8점)
+            div_yield = stock.get("dart_dividend_yield", 0.0)
+            if div_yield >= 3.0:
+                dividend_bonus = min(8.0, div_yield * 2.0)
+                final_score += dividend_bonus
+            
+            # 재무건전성 패널티 (부채비율 200% 이상 시 -10점)
+            if stock.get("dart_debt_ratio", 100.0) > 200:
+                final_score -= 10.0
+                stock["_debt_penalty"] = True
+            
             stock["total_score"] = round(final_score, 2)
-
+        
         # 점수 기준 내림차순 정렬
         sorted_stocks = sorted(stocks, key=lambda x: x["total_score"], reverse=True)
         return sorted_stocks
@@ -549,10 +646,19 @@ class StrategyEngine:
             top_5 = scored_stocks[:5]
             for i, s in enumerate(top_5):
                 held = "📌" if s["ticker"] in [h["ticker"] for h in holdings] else "  "
+                dart_tag = "📋" if s.get("dart_available") else ""
                 lines.append(
                     f"{i+1}. {held}{s['name']} ({s['ticker']}) "
-                    f"| 점수: {s['total_score']:.1f}"
+                    f"| 점수: {s['total_score']:.1f} {dart_tag}"
                 )
+                # DART 재무 상세 (조회 성공한 종목만)
+                if s.get("dart_available"):
+                    lines.append(
+                        f"   └ 매출{s.get('dart_revenue_growth', 0):+.1f}% "
+                        f"| 영업이익{s.get('dart_op_growth', 0):+.1f}% "
+                        f"| 부채{s.get('dart_debt_ratio', 0):.0f}% "
+                        f"| 배당{s.get('dart_dividend_yield', 0):.1f}%"
+                    )
             lines.append("")
             
             # 3. 매도 시그널
