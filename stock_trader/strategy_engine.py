@@ -74,6 +74,8 @@ class StrategyEngine:
 
     def __init__(self):
         logger.info("중장기 전략 엔진(Strategy Engine) 초기화 중...")
+        self.is_system_locked = False
+        self.lock_reason = ""
         self._init_db()
         self._init_session()
         self._init_dart()
@@ -149,6 +151,42 @@ class StrategyEngine:
             self.RSI_BUY_THRES = self.BEAR_RSI
             self.BB_STD = self.BEAR_BB
 
+
+    def check_market_circuit_breaker(self) -> bool:
+        """
+        [최상위 안전장치] 시장의 극단적 패닉을 감시하고 결과와 이유를 상세히 로깅합니다.
+        반환값: True (정상 가동 가능), False (시스템 셧다운/매수 금지)
+        """
+        logger.info("🛡️ 시장 서킷 브레이커(패닉 셀 감지) 검사 중...")
+        try:
+            import FinanceDataReader as fdr
+            # 1. 오늘 자 코스피 데이터 확인
+            df_kospi = fdr.DataReader('KS11')
+            if df_kospi.empty or len(df_kospi) < 2:
+                return True # 데이터 오류 시 기본 엔진 가동 보장
+                
+            current_close = float(df_kospi['Close'].iloc[-1])
+            prev_close = float(df_kospi['Close'].iloc[-2])
+            
+            # 당일 지수 변동률 계산
+            kospi_daily_change = ((current_close - prev_close) / prev_close) * 100
+            
+            # 🚨 비상 제어 조건 1: 코스피 하루 -3% 이상 폭락 시 (패닉 셀링 방지)
+            if kospi_daily_change <= -3.0:
+                self.is_system_locked = True
+                self.lock_reason = f"코스피 당일 폭락 급류 발생 ({kospi_daily_change:.2f}%)"
+                logger.warning(f"🚨 [CRITICAL LOCK] 시스템 서킷 브레이커 발동! 이유: {self.lock_reason}. 모든 신규 매수를 금지합니다.")
+                return False
+                
+            # 정상인 경우 락 해제
+            self.is_system_locked = False
+            self.lock_reason = ""
+            logger.info(f"✅ 서킷 브레이커 통과 (코스피 변동률: {kospi_daily_change:+.2f}%)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 서킷 브레이커 체크 중 에러 발생: {e}")
+            return True
 
     def _init_dart(self):
         """DART API 및 재무 점수 계산기 초기화"""
@@ -835,6 +873,9 @@ class StrategyEngine:
         # 0. 실시간 국면 판독 및 매매 파라미터 결정
         self._determine_market_regime()
         
+        # 0-1. 시장 서킷 브레이커 작동 확인
+        self.check_market_circuit_breaker()
+        
         # 1. 신규 전략 종목 선정 및 실시간 데이터 수집
         market_data = self.fetch_market_data()
         scored_stocks = self.calculate_scores(market_data)
@@ -850,18 +891,38 @@ class StrategyEngine:
         # 4. 신규 매수 시그널 포지션 사이징 계산 (RSI / Bollinger Band 하단 바운스 필터링 적용)
         buy_signals = []
         for s in top_5:
-            # 이미 보유 중이거나 금일 매도 시그널이 발생한 종목은 매수 제외
-            is_held = s["ticker"] in [h["ticker"] for h in holdings]
-            is_selling = s["ticker"] in [sel["ticker"] for sel in sell_signals]
+            ticker = s["ticker"]
+            name = s["name"]
             
-            # 기술적 지표 조건 검증: RSI 과매도 구간(<=RSI_BUY_THRES) 또는 BB 하단선 터치
+            # 이미 보유 중이거나 금일 매도 시그널이 발생한 종목은 매수 제외
+            is_held = ticker in [h["ticker"] for h in holdings]
+            is_selling = ticker in [sel["ticker"] for sel in sell_signals]
+            
+            if is_held or is_selling:
+                continue
+                
+            # 가장 먼저 서킷 브레이커 통과 여부 검사
+            if getattr(self, 'is_system_locked', False):
+                logger.info(f"⏭️ [{name}({ticker})] 매수 검사 생략: 현재 시스템이 셧다운 상태입니다. (사유: {self.lock_reason})")
+                continue
+            
             rsi_val = s.get("rsi", 50.0)
             lower_band = s.get("lower_band", 0.0)
             price = s["price"]
             
-            pass_technical_filter = (rsi_val <= self.RSI_BUY_THRES) or (lower_band > 0 and price <= lower_band)
+            regime_mode = getattr(self, 'current_regime', 'UNKNOWN')
             
-            if not is_held and not is_selling and pass_technical_filter:
+            # 기술적 타점 판별 (AND 조건)
+            is_rsi_match = rsi_val <= self.RSI_BUY_THRES
+            is_bb_match = (lower_band > 0) and (price <= lower_band)
+            pass_technical_filter = is_rsi_match and is_bb_match
+            
+            if pass_technical_filter:
+                logger.info(
+                    f"🎯 [타점 포착] 종목: {name}({ticker}) | 국면: {regime_mode} | "
+                    f"RSI: {rsi_val:.1f}(기준:{self.RSI_BUY_THRES}) MATCH | "
+                    f"현재가: {price:,} <= BB하단: {lower_band:,.0f} MATCH -> 매수 주문 승인"
+                )
                 if price > 0:
                     # 종목당 배정 금액: 총자산 * 타겟비중
                     target_amt = self.TOTAL_EQUITY * self.TARGET_WEIGHT
@@ -870,12 +931,19 @@ class StrategyEngine:
                     quantity = 0
                     
                 buy_signals.append({
-                    "ticker": s["ticker"],
-                    "name": s["name"],
+                    "ticker": ticker,
+                    "name": name,
                     "action": "BUY",
                     "quantity": quantity,
-                    "reason": f"전략 진입 & 기술적 과매도 부합 (점수: {s['total_score']}, RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원, 현재가: {price:,.0f}원)"
+                    "reason": f"전략 진입 & 기술적 타점 부합 (국면: {regime_mode}, RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원, 현재가: {price:,.0f}원)"
                 })
+            else:
+                fail_reason = []
+                if not is_rsi_match: fail_reason.append(f"RSI 미달({rsi_val:.1f}>{self.RSI_BUY_THRES})")
+                if not is_bb_match: fail_reason.append(f"가격이 BB하단선 위({price:,}>{lower_band:,.0f})")
+                
+                if rsi_val <= (self.RSI_BUY_THRES + 5):
+                    logger.info(f"🔍 [{name}({ticker})] 타점 근접 및 탈락 사유: {', '.join(fail_reason)}")
 
         # 5. DB 반영
         self.update_signals(buy_signals, sell_signals)
