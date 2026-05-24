@@ -2,7 +2,10 @@ import os
 import sqlite3
 import json
 import subprocess
-import psutil
+try:
+    import psutil
+except (ImportError, NotImplementedError):
+    psutil = None
 from datetime import datetime, timedelta, timezone
 from telegram_utils import send_telegram_message
 
@@ -13,11 +16,20 @@ from config import DB_PATH
 
 def get_system_metrics():
     # 1. CPU Percent (인터벌을 늘려 정확도 향상)
-    cpu_usage = psutil.cpu_percent(interval=1.0)
+    cpu_usage = psutil.cpu_percent(interval=1.0) if psutil else 0.0
     
     # 2. Memory Info
-    mem = psutil.virtual_memory()
-    mem_usage_pct = mem.percent
+    if psutil:
+        mem = psutil.virtual_memory()
+        mem_usage_pct = mem.percent
+        mem_total_kb = int(mem.total / 1024)
+        mem_used_kb = int(mem.used / 1024)
+        mem_available_kb = int(mem.available / 1024)
+    else:
+        mem_usage_pct = 0.0
+        mem_total_kb = 0
+        mem_used_kb = 0
+        mem_available_kb = 0
     
     # 3. Battery Info (시스템 권한 및 PRoot 환경 이슈로 비활성화)
     battery_level = "N/A"
@@ -54,9 +66,9 @@ def get_system_metrics():
         "cpu_temp": cpu_temp,
         # 하위 호환성을 위한 기존 키 유지
         "cpu_load_1m": os.getloadavg()[0] if hasattr(os, 'getloadavg') else 0.0,
-        "mem_total_kb": int(mem.total / 1024),
-        "mem_used_kb": int(mem.used / 1024),
-        "mem_available_kb": int(mem.available / 1024),
+        "mem_total_kb": mem_total_kb,
+        "mem_used_kb": mem_used_kb,
+        "mem_available_kb": mem_available_kb,
         "mem_usage_pct": mem_usage_pct
     }
 
