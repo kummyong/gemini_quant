@@ -82,9 +82,11 @@ class StrategyEngine:
     def _load_hyperparams(self):
         """DB에서 최신 하이퍼파라미터를 로드하여 매매 기준으로 사용합니다 (Phase 1)"""
         params = {
-            "RSI_BUY_THRES": 30.0,
+            "BULL_RSI": 30.0,
+            "BULL_BB": 2.0,
+            "BEAR_RSI": 25.0,
+            "BEAR_BB": 2.2,
             "RSI_SELL_THRES": 70.0,
-            "BB_STD": 2.0,
             "TRAILING_STOP_DROP": 3.0,
             "HARD_STOP_LOSS": -5.0
         }
@@ -94,16 +96,58 @@ class StrategyEngine:
                 cursor.execute("SELECT param_key, param_value FROM strategy_hyperparams")
                 rows = cursor.fetchall()
                 for row in rows:
-                    params[row[0]] = float(row[1])
+                    if row[0] in params:
+                        params[row[0]] = float(row[1])
             logger.info(f"✅ DB에서 파라미터 로드 완료: {params}")
         except Exception as e:
             logger.error(f"⚠️ DB 파라미터 로드 실패 (기존 설정값 유지): {e}")
         
-        self.RSI_BUY_THRES = params["RSI_BUY_THRES"]
+        self.BULL_RSI = params["BULL_RSI"]
+        self.BULL_BB = params["BULL_BB"]
+        self.BEAR_RSI = params["BEAR_RSI"]
+        self.BEAR_BB = params["BEAR_BB"]
+        
+        # 임시 기본값 (이후 _determine_market_regime에서 덮어씀)
+        self.RSI_BUY_THRES = self.BULL_RSI
+        self.BB_STD = self.BULL_BB
+
         self.RSI_SELL_THRES = params["RSI_SELL_THRES"]
-        self.BB_STD = params["BB_STD"]
         self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
+
+    def _determine_market_regime(self):
+        """KOSPI 50일 이동평균선을 기준으로 BULL/BEAR 국면을 판독하고 해당 국면에 맞는 파라미터를 설정합니다."""
+        logger.info("📈 실시간 KOSPI(KS11) 국면 판독 시작...")
+        try:
+            import FinanceDataReader as fdr
+            import datetime
+            # 최근 90일치 코스피 데이터 로드
+            start_date = (datetime.datetime.now() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
+            kospi = fdr.DataReader("KS11", start=start_date)
+            
+            if not kospi.empty and len(kospi) >= 50:
+                kospi["50_MA"] = kospi["Close"].rolling(window=50).mean()
+                latest_close = float(kospi["Close"].iloc[-1])
+                latest_ma = float(kospi["50_MA"].iloc[-1])
+                
+                if latest_close > latest_ma:
+                    self.current_regime = "BULL"
+                    self.RSI_BUY_THRES = self.BULL_RSI
+                    self.BB_STD = self.BULL_BB
+                else:
+                    self.current_regime = "BEAR"
+                    self.RSI_BUY_THRES = self.BEAR_RSI
+                    self.BB_STD = self.BEAR_BB
+                    
+                logger.info(f"⚖️ [현재 시장 국면] {self.current_regime} (코스피: {latest_close:,.2f} / 50일선: {latest_ma:,.2f})")
+                logger.info(f"👉 [적용 파라미터] RSI 매수선: {self.RSI_BUY_THRES}, BB 하단배수: {self.BB_STD}")
+            else:
+                raise ValueError("코스피 데이터가 부족합니다.")
+        except Exception as e:
+            logger.error(f"❌ 국면 판독 실패 (기본 BULL 파라미터 적용): {e}")
+            self.current_regime = "BULL (Fallback)"
+            self.RSI_BUY_THRES = self.BULL_RSI
+            self.BB_STD = self.BULL_BB
 
 
     def _init_dart(self):
@@ -787,6 +831,9 @@ class StrategyEngine:
         """전략 실행 및 포트폴리오 관리 메인 프로세스"""
         logger.info("==========================================")
         logger.info("포트폴리오 관리 및 전략 엔진 가동")
+        
+        # 0. 실시간 국면 판독 및 매매 파라미터 결정
+        self._determine_market_regime()
         
         # 1. 신규 전략 종목 선정 및 실시간 데이터 수집
         market_data = self.fetch_market_data()
