@@ -44,7 +44,6 @@ def run_watchdog():
     last_summary_run = None
     last_dart_check_minute = -1  # DART 공시 감시 마지막 실행 시각 (분 단위)
     last_universe_expand = None  # 유니버스 확장 마지막 실행 월
-    last_trainer_run = None      # 주말 자가 학습 마지막 실행 날짜
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -92,18 +91,7 @@ def run_watchdog():
                 except Exception as e:
                     log(f"❌ [Schedule] 일일 마감 보고 전송 실패: {e}")
 
-        # [스케줄링] 주말 파라미터 자가 학습 (매주 토요일 09:00:00 ~ 09:00:30 사이 한 번만)
-        if now.weekday() == 5 and now.hour == 9 and now.minute == 0:
-            today_str = now.strftime("%Y-%m-%d")
-            if last_trainer_run != today_str:
-                log("📅 [Schedule] 주말 자가 학습 엔진 자동 실행 (09:00)")
-                trainer_path = os.path.join(BASE_DIR, "stock_trader/trainer.py")
-                try:
-                    subprocess.run([VENV_PYTHON, trainer_path], env=env, check=True)
-                    log("✨ [Schedule] 주말 자가 학습 완료")
-                    last_trainer_run = today_str
-                except Exception as e:
-                    log(f"❌ [Schedule] 주말 자가 학습 실패: {e}")
+        # 주말 파라미터 자가 학습은 PC(Trainer Node)에서 처리하므로 모바일 스케줄은 제거함
 
         # [스케줄링] DART 공시 감시 (장중 매 30분 간격: 09:00, 09:30, 10:00, ..., 15:00)
         if now.weekday() < 5 and 9 <= now.hour < 16:

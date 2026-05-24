@@ -158,10 +158,53 @@ def get_ai_teacher_decision(text):
 # Alias for compatibility with test suite
 get_intent_robust = get_ai_teacher_decision
 
+def handle_system_update(text: str) -> str:
+    """[SYSTEM_UPDATE] 메시지를 파싱하여 DB를 업데이트하고 성공 결과를 반환합니다."""
+    logger.info("[System Update] 파라미터 업데이트 요청 수신")
+    try:
+        content = text[len("[SYSTEM_UPDATE]"):].strip()
+        # 정규표현식으로 Key=Value 패턴 추출
+        pairs = re.findall(r'([A-Za-z0-9_]+)\s*=\s*([+-]?[0-9]*\.?[0-9]+)', content)
+        if not pairs:
+            return "❌ [SYSTEM_UPDATE_FAIL] 파라미터 추출 실패. 포맷을 확인하세요 (예: [SYSTEM_UPDATE] BB_STD=2.1)"
+        
+        updated_dict = {}
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            for key, val_str in pairs:
+                val = float(val_str)
+                # 키 매핑 (CUTOFF -> THRES 호환성 유지)
+                db_key = key
+                if key == "RSI_BUY_CUTOFF":
+                    db_key = "RSI_BUY_THRES"
+                elif key == "RSI_SELL_CUTOFF":
+                    db_key = "RSI_SELL_THRES"
+                
+                cursor.execute("""
+                    INSERT INTO strategy_hyperparams (param_key, param_value, updated_at)
+                    VALUES (?, ?, datetime('now', 'localtime'))
+                    ON CONFLICT(param_key) DO UPDATE SET
+                        param_value = excluded.param_value,
+                        updated_at = excluded.updated_at
+                """, (db_key, val))
+                updated_dict[key] = val
+            conn.commit()
+        
+        param_strs = [f"{k}={v}" for k, v in updated_dict.items()]
+        logger.info(f"[System Update] 파라미터 DB 업데이트 완료: {updated_dict}")
+        return f"[SYSTEM_UPDATE_SUCCESS] " + ", ".join(param_strs)
+    except Exception as e:
+        logger.error(f"[System Update] 처리 중 오류: {e}")
+        return f"❌ [SYSTEM_UPDATE_FAIL] 오류 발생: {e}"
+
 def process_and_reply(text: str):
     global last_interaction
     now = time.time()
     text_raw = text.strip()
+    
+    # [System Update] 파라미터 강제 업데이트 처리
+    if text_raw.startswith("[SYSTEM_UPDATE]"):
+        return handle_system_update(text_raw)
     
     # [0] 슬래시 명령어(/) 직접 처리
     if text_raw.startswith("/"):

@@ -107,28 +107,65 @@ class TestStrategyEngineRealData(unittest.TestCase):
             self.assertEqual(data[0]["net_buying"], 0.3)  # (1000 + 2000) * 10000 / 1e8
 
     def test_calculate_scores_normalization(self):
-        # Test min-max scaling and ranking output
+        # Test min-max scaling and ranking output with DART keys
         stocks = [
-            {"ticker": "A", "name": "Stock A", "eps_growth": 10.0, "industry_score": 50.0, "net_buying": 100.0},
-            {"ticker": "B", "name": "Stock B", "eps_growth": 50.0, "industry_score": 60.0, "net_buying": 500.0},
-            {"ticker": "C", "name": "Stock C", "eps_growth": 100.0, "industry_score": 70.0, "net_buying": 1000.0},
+            {
+                "ticker": "A", "name": "Stock A", "eps_growth": 10.0, "industry_score": 50.0, "net_buying": 100.0,
+                "dart_revenue_growth": 10.0, "dart_op_growth": 10.0, "dart_debt_ratio": 50.0, "dart_cf_quality": 50.0
+            },
+            {
+                "ticker": "B", "name": "Stock B", "eps_growth": 50.0, "industry_score": 60.0, "net_buying": 500.0,
+                "dart_revenue_growth": 50.0, "dart_op_growth": 50.0, "dart_debt_ratio": 50.0, "dart_cf_quality": 50.0
+            },
+            {
+                "ticker": "C", "name": "Stock C", "eps_growth": 100.0, "industry_score": 70.0, "net_buying": 1000.0,
+                "dart_revenue_growth": 100.0, "dart_op_growth": 100.0, "dart_debt_ratio": 50.0, "dart_cf_quality": 50.0
+            },
         ]
         
         # Under min-max:
         # EPS growth: A=0, B=44.44, C=100
+        # Macro: A=50, B=60, C=70
+        # Revenue growth: A=0, B=44.44, C=100
+        # OP growth: A=0, B=44.44, C=100
+        # Debt ratio: 50% for all -> debt_score = max(0, 100 - 50) = 50.0
+        # Health score: 50 * 0.5 + 50 * 0.5 = 50.0
         # Net buying: A=0, B=44.44, C=100
         # Scores:
-        # A: (0 * 0.4) + (50 * 0.3) + (0 * 0.3) = 15.0
-        # B: (44.44 * 0.4) + (60 * 0.3) + (44.44 * 0.3) = 17.78 + 18 + 13.33 = 49.11
-        # C: (100 * 0.4) + (70 * 0.3) + (100 * 0.3) = 40 + 21 + 30 = 91.0
+        # C:
+        #   s_eps (100 * 0.15) = 15.0
+        #   s_macro (70 * 0.20) = 14.0
+        #   s_rev (100 * 0.15) = 15.0
+        #   s_op (100 * 0.20) = 20.0
+        #   health_score (50 * 0.05) = 2.5
+        #   s_net (100 * 0.25) = 25.0
+        #   Total = 15 + 14 + 15 + 20 + 2.5 + 25 = 91.5
+        #
+        # B:
+        #   s_eps (44.4444 * 0.15) = 6.67
+        #   s_macro (60 * 0.20) = 12.0
+        #   s_rev (44.4444 * 0.15) = 6.67
+        #   s_op (44.4444 * 0.20) = 8.89
+        #   health_score (50 * 0.05) = 2.5
+        #   s_net (44.4444 * 0.25) = 11.11
+        #   Total = 6.67 + 12 + 6.67 + 8.89 + 2.5 + 11.11 = 47.84
+        #
+        # A:
+        #   s_eps (0 * 0.15) = 0.0
+        #   s_macro (50 * 0.20) = 10.0
+        #   s_rev (0 * 0.15) = 0.0
+        #   s_op (0 * 0.20) = 0.0
+        #   health_score (50 * 0.05) = 2.5
+        #   s_net (0 * 0.25) = 0.0
+        #   Total = 10 + 2.5 = 12.5
         
         scored = self.engine.calculate_scores(stocks)
         self.assertEqual(scored[0]["ticker"], "C")
-        self.assertAlmostEqual(scored[0]["total_score"], 91.0)
+        self.assertAlmostEqual(scored[0]["total_score"], 91.5)
         self.assertEqual(scored[1]["ticker"], "B")
-        self.assertAlmostEqual(scored[1]["total_score"], 49.11)
+        self.assertAlmostEqual(scored[1]["total_score"], 47.83)
         self.assertEqual(scored[2]["ticker"], "A")
-        self.assertAlmostEqual(scored[2]["total_score"], 15.0)
+        self.assertAlmostEqual(scored[2]["total_score"], 12.5)
 
     def test_trailing_stop_logic(self):
         # 1. 고점이 +3.0% 였고, 현재 수익률이 0.0%인 경우 (3.0%p 이상 하락) -> Trailing Stop 매도 작동 검증
