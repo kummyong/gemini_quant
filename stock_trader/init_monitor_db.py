@@ -1,8 +1,15 @@
-import sqlite3
+import sys
 import os
+import sqlite3
 
-# 데이터베이스 경로 설정
-DB_PATH = "/root/workspace/gemini-quant/stock_trader/logs/system_monitor.db"
+# stock_trader 경로를 추가하여 config 임포트 가능하도록 설정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+try:
+    from config import DB_PATH
+except ImportError:
+    DB_PATH = os.path.join(BASE_DIR, "logs", "system_monitor.db")
 
 def init_db():
     # 저장 디렉토리 생성 확인
@@ -97,6 +104,29 @@ def init_db():
             created_at DATETIME DEFAULT (datetime('now', 'localtime'))
         )
         """)
+
+        # strategy_hyperparams: 매매 전략 초매개변수 관리 테이블 (Phase 1)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_hyperparams (
+            param_key TEXT PRIMARY KEY,
+            param_value REAL,
+            updated_at DATETIME DEFAULT (datetime('now', 'localtime'))
+        )
+        """)
+
+        # 초기 하이퍼파라미터 삽입
+        initial_params = [
+            ("RSI_BUY_THRES", 30.0),
+            ("RSI_SELL_THRES", 70.0),
+            ("BB_STD", 2.0),
+            ("TRAILING_STOP_DROP", 3.0),
+            ("HARD_STOP_LOSS", -5.0)
+        ]
+        for key, val in initial_params:
+            cursor.execute("""
+                INSERT OR IGNORE INTO strategy_hyperparams (param_key, param_value)
+                VALUES (?, ?)
+            """, (key, val))
 
         # 인덱스 생성
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks (status)")

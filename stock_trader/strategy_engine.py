@@ -62,9 +62,12 @@ class StrategyEngine:
     TOTAL_EQUITY = 10000000000.0  # 가상의 총 운용 자산 (100억 원)
     TARGET_WEIGHT = 0.10          # 종목당 목표 비중 (10%)
     
-    # 리스크 관리 매개변수
-    TRAILING_STOP_DROP = 3.0       # 최고 수익률 대비 하락폭 익절선 (3.0%p)
-    HARD_STOP_LOSS = -5.0          # 개별 및 글로벌 절대 손절선 (-5.0%)
+    # 기본값 설정 (DB 로드 실패 시 예비용)
+    RSI_BUY_THRES = 30.0
+    RSI_SELL_THRES = 70.0
+    BB_STD = 2.0
+    TRAILING_STOP_DROP = 3.0
+    HARD_STOP_LOSS = -5.0
 
     from stock_universe import SAMPLE_TICKERS
     SAMPLE_DATA = SAMPLE_TICKERS
@@ -74,6 +77,34 @@ class StrategyEngine:
         self._init_db()
         self._init_session()
         self._init_dart()
+        self._load_hyperparams()
+
+    def _load_hyperparams(self):
+        """DB에서 최신 하이퍼파라미터를 로드하여 매매 기준으로 사용합니다 (Phase 1)"""
+        params = {
+            "RSI_BUY_THRES": 30.0,
+            "RSI_SELL_THRES": 70.0,
+            "BB_STD": 2.0,
+            "TRAILING_STOP_DROP": 3.0,
+            "HARD_STOP_LOSS": -5.0
+        }
+        try:
+            with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT param_key, param_value FROM strategy_hyperparams")
+                rows = cursor.fetchall()
+                for row in rows:
+                    params[row[0]] = float(row[1])
+            logger.info(f"✅ DB에서 파라미터 로드 완료: {params}")
+        except Exception as e:
+            logger.error(f"⚠️ DB 파라미터 로드 실패 (기존 설정값 유지): {e}")
+        
+        self.RSI_BUY_THRES = params["RSI_BUY_THRES"]
+        self.RSI_SELL_THRES = params["RSI_SELL_THRES"]
+        self.BB_STD = params["BB_STD"]
+        self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
+        self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
+
 
     def _init_dart(self):
         """DART API 및 재무 점수 계산기 초기화"""
@@ -322,6 +353,33 @@ class StrategyEngine:
                 except Exception as dart_e:
                     logger.warning(f"[{name}] DART 데이터 조회 실패 (무시): {dart_e}")
             
+            # ──── RSI & Bollinger Bands 기술적 지표 계산 (FinanceDataReader 활용) ────
+            rsi_val = 50.0
+            lower_band = 0.0
+            upper_band = 0.0
+            
+            try:
+                import FinanceDataReader as fdr
+                # S22 Ultra 발열 제어 및 RAM 보호를 위한 최소 분량(90일) 일봉 데이터만 조회 (경량화 아키텍처)
+                df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
+                if not df_hist.empty and len(df_hist) >= 20:
+                    closes = df_hist['Close']
+                    # RSI (14)
+                    delta = closes.diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / (loss + 1e-9)
+                    rsi_series = 100 - (100 / (1 + rs))
+                    rsi_val = float(rsi_series.iloc[-1])
+                    
+                    # Bollinger Bands (20, BB_STD)
+                    ma20 = closes.rolling(window=20).mean()
+                    std20 = closes.rolling(window=20).std()
+                    lower_band = float((ma20 - self.BB_STD * std20).iloc[-1])
+                    upper_band = float((ma20 + self.BB_STD * std20).iloc[-1])
+            except Exception as tech_e:
+                logger.warning(f"[{name}] 기술 지표(RSI/BB) 계산 실패 (기본값 대체): {tech_e}")
+
             real_stocks.append({
                 "ticker": ticker,
                 "name": name,
@@ -336,7 +394,11 @@ class StrategyEngine:
                 "dart_cf_quality": dart_cf_quality,
                 "dart_dividend_yield": dart_dividend_yield,
                 "dart_major_shareholder_bonus": dart_major_shareholder_bonus,
-                "dart_available": dart_available
+                "dart_available": dart_available,
+                # 기술적 지표 데이터 (Phase 1)
+                "rsi": rsi_val,
+                "lower_band": lower_band,
+                "upper_band": upper_band
             })
             
             # API 요청 오남용 방지 및 IP 차단 방지를 위한 0.5초 정중한 대기
@@ -512,12 +574,17 @@ class StrategyEngine:
 
         return holdings
 
-    def generate_management_signals(self, current_holdings: List[Dict], top_tickers: List[str]):
-        """Trailing Stop 및 절대 손절선(Hard Stop Loss) 기반 매도 시그널 생성"""
+    def generate_management_signals(self, current_holdings: List[Dict], top_tickers: List[str], market_data: List[Dict] = None):
+        """Trailing Stop 및 절대 손절선(Hard Stop Loss) 기반 매도 시그널 생성 + RSI/BB 오버슈팅 매도 (Phase 1)"""
         sell_signals = []
         
         if not current_holdings:
             return sell_signals
+
+        # market_data 매핑 생성 {ticker: stock_dict}
+        market_map = {}
+        if market_data:
+            market_map = {s["ticker"]: s for s in market_data}
 
         # 1. 계좌 전체 생존을 위한 글로벌 손절선 (Account-wide Hard Stop)
         # 전체 보유 종목의 평가 이익/손실 합산 계산
@@ -544,7 +611,7 @@ class StrategyEngine:
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": stock["quantity"],  # 전량 매도
-                    "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%)"
+                    "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%, 기준: {self.HARD_STOP_LOSS}%)"
                 })
             
             # 긴급 텔레그램 알림: 글로벌 손절
@@ -568,6 +635,12 @@ class StrategyEngine:
             profit = stock["profit_rate"]
             max_profit = stock.get("max_profit_rate", 0.0)
             quantity = stock["quantity"]
+            current_price = stock.get("current_price", 0.0)
+            
+            # market_data로부터 최신 기술적 지표 조회
+            s_data = market_map.get(ticker, {})
+            rsi_val = s_data.get("rsi", 50.0)
+            upper_band = s_data.get("upper_band", 999999999.0)
             
             # 2-1. 개별 종목 Hard Stop Loss (절대 손절선: 예: -5% 이하)
             if profit <= self.HARD_STOP_LOSS:
@@ -576,22 +649,33 @@ class StrategyEngine:
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%)"
+                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%, 기준: {self.HARD_STOP_LOSS}%)"
                 })
                 logger.warning(f"⚠️ [개별 손절] {stock['name']} 절대 손절선 도달로 전량 청산 (수익률: {profit:.2f}%)")
                 
-            # 2-2. 개별 종목 Trailing Stop (고점 대비 하락 익절선: 고점이 +2.0% 이상이었고 고점 대비 3%p 하락 시)
+            # 2-2. 개별 종목 Trailing Stop (고점 대비 하락 익절선: 고점이 +2.0% 이상이었고 고점 대비 trailing_stop_drop 하락 시)
             elif max_profit >= 2.0 and (max_profit - profit) >= self.TRAILING_STOP_DROP:
                 sell_signals.append({
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p)"
+                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {self.TRAILING_STOP_DROP}%p)"
                 })
                 logger.info(f"🎯 [트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
                 
-            # 2-3. 리밸런싱 교체 매매 (전략 상위 순위 밖 & 수익률 저조)
+            # 2-3. 개별 종목 RSI 오버슈팅 & BB 상단 도달 (익절/대피 시그널) (Phase 1)
+            elif rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band:
+                sell_signals.append({
+                    "ticker": ticker,
+                    "name": stock["name"],
+                    "action": "SELL",
+                    "quantity": quantity,
+                    "reason": f"오버슈팅 청산 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)"
+                })
+                logger.info(f"📈 [오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
+
+            # 2-4. 리밸런싱 교체 매매 (전략 상위 순위 밖 & 수익률 저조)
             elif ticker not in top_tickers and profit < 2.0:
                 sell_signals.append({
                     "ticker": ticker,
@@ -713,18 +797,24 @@ class StrategyEngine:
         # 2. 현재 포트폴리오 분석 및 고점/수익률 추적
         holdings = self.fetch_current_holdings()
         
-        # 3. 매도/매수 시그널 생성
-        sell_signals = self.generate_management_signals(holdings, top_tickers)
+        # 3. 매도/매수 시그널 생성 (market_data 전달)
+        sell_signals = self.generate_management_signals(holdings, top_tickers, market_data)
         
-        # 4. 신규 매수 시그널 포지션 사이징 계산
+        # 4. 신규 매수 시그널 포지션 사이징 계산 (RSI / Bollinger Band 하단 바운스 필터링 적용)
         buy_signals = []
         for s in top_5:
             # 이미 보유 중이거나 금일 매도 시그널이 발생한 종목은 매수 제외
             is_held = s["ticker"] in [h["ticker"] for h in holdings]
             is_selling = s["ticker"] in [sel["ticker"] for sel in sell_signals]
             
-            if not is_held and not is_selling:
-                price = s["price"]
+            # 기술적 지표 조건 검증: RSI 과매도 구간(<=RSI_BUY_THRES) 또는 BB 하단선 터치
+            rsi_val = s.get("rsi", 50.0)
+            lower_band = s.get("lower_band", 0.0)
+            price = s["price"]
+            
+            pass_technical_filter = (rsi_val <= self.RSI_BUY_THRES) or (lower_band > 0 and price <= lower_band)
+            
+            if not is_held and not is_selling and pass_technical_filter:
                 if price > 0:
                     # 종목당 배정 금액: 총자산 * 타겟비중
                     target_amt = self.TOTAL_EQUITY * self.TARGET_WEIGHT
@@ -737,7 +827,7 @@ class StrategyEngine:
                     "name": s["name"],
                     "action": "BUY",
                     "quantity": quantity,
-                    "reason": f"전략 상위 종목 신규 진입 (점수: {s['total_score']}, 비중: {self.TARGET_WEIGHT*100:.0f}%, 현재가: {price:,.0f}원)"
+                    "reason": f"전략 진입 & 기술적 과매도 부합 (점수: {s['total_score']}, RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원, 현재가: {price:,.0f}원)"
                 })
 
         # 5. DB 반영
