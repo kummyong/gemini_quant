@@ -13,6 +13,25 @@ import sqlite3
 import logging
 from logging.handlers import RotatingFileHandler
 
+# Mock modules on Windows to make import and format tests work without local dependencies
+if sys.platform == 'win32':
+    from unittest.mock import MagicMock
+    sys.modules['fcntl'] = MagicMock()
+    sys.modules['dotenv'] = MagicMock()
+    sys.modules['psutil'] = MagicMock()
+    sys.modules['matplotlib'] = MagicMock()
+    sys.modules['matplotlib.pyplot'] = MagicMock()
+    sys.modules['joblib'] = MagicMock()
+    sys.modules['mcp'] = MagicMock()
+    sys.modules['mcp.server'] = MagicMock()
+    sys.modules['mcp.server.fastmcp'] = MagicMock()
+    sys.modules['google'] = MagicMock()
+    sys.modules['google.oauth2'] = MagicMock()
+    sys.modules['google.oauth2.service_account'] = MagicMock()
+    sys.modules['googleapiclient'] = MagicMock()
+    sys.modules['googleapiclient.discovery'] = MagicMock()
+
+
 # Add current directory to path to locate config and stock_universe
 STOCK_TRADER_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(STOCK_TRADER_DIR)
@@ -71,24 +90,24 @@ class TestRefactoring(unittest.TestCase):
         for name, mod_path in modules_to_test:
             try:
                 __import__(mod_path)
-                print(f"  ✅ Import successful: {name}")
+                print(f"  [OK] Import successful: {name}")
             except ImportError as e:
                 # Some modules might require external API keys or DB connections,
                 # but basic import/syntax should not fail unless missing dependencies.
-                print(f"  ⚠️  Import warning for {name}: {e}")
+                print(f"  [WARN] Import warning for {name}: {e}")
             except Exception as e:
-                print(f"  ❌ Import failed for {name}: {e}")
+                print(f"  [FAIL] Import failed for {name}: {e}")
                 raise e
 
         # Test secretary import
         sys.path.insert(0, os.path.join(PROJECT_DIR, "secretary"))
         try:
             import auto_sync_history
-            print("  ✅ Import successful: auto_sync_history")
+            print("  [OK] Import successful: auto_sync_history")
         except ImportError as e:
-            print(f"  ⚠️  Import warning for auto_sync_history: {e}")
+            print(f"  [WARN] Import warning for auto_sync_history: {e}")
         except Exception as e:
-            print(f"  ❌ Import failed for auto_sync_history: {e}")
+            print(f"  [FAIL] Import failed for auto_sync_history: {e}")
             raise e
 
     def test_04_db_connection_with_pattern(self):
@@ -98,20 +117,26 @@ class TestRefactoring(unittest.TestCase):
         
         # Test creation and write
         try:
-            with sqlite3.connect(test_db, timeout=5.0) as conn:
+            conn = sqlite3.connect(test_db, timeout=5.0)
+            try:
                 cursor = conn.cursor()
                 cursor.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, val TEXT)")
                 cursor.execute("INSERT INTO test (val) VALUES (?)", ("test_val",))
                 conn.commit()
+            finally:
+                conn.close()
             
             # Test read
-            with sqlite3.connect(test_db, timeout=5.0) as conn:
+            conn = sqlite3.connect(test_db, timeout=5.0)
+            try:
                 cursor = conn.cursor()
                 cursor.execute("SELECT val FROM test WHERE id=1")
                 row = cursor.fetchone()
                 self.assertEqual(row[0], "test_val")
+            finally:
+                conn.close()
                 
-            print("\n[Test] SQLite context manager verified successfully.")
+            print("\n[Test] SQLite connection verified successfully.")
         finally:
             if os.path.exists(test_db):
                 os.remove(test_db)
@@ -146,5 +171,115 @@ class TestRefactoring(unittest.TestCase):
             if os.path.exists(backup):
                 os.remove(backup)
 
+    def test_06_summary_trader_telegram_formatting(self):
+        """Test daily summary telegram message formatting with mock DB data"""
+        from unittest.mock import patch
+        import summary_trader
+        import config
+        import datetime
+        
+        # 임시 테스트 DB를 만들어 데이터 포맷 검증
+        test_db = os.path.join(config.LOG_DIR, "test_summary_temp.db")
+        if os.path.exists(test_db):
+            try:
+                os.remove(test_db)
+            except PermissionError:
+                pass
+        summary_trader.DB_PATH = test_db
+        
+        try:
+            with sqlite3.connect(test_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS account_summary (
+                        total_assets INTEGER, cash INTEGER, cash_ratio REAL, timestamp DATETIME
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio_status (
+                        stk_cd TEXT PRIMARY KEY, stk_nm TEXT, rmnd_qty INTEGER, pur_pric INTEGER, cur_prc INTEGER, prft_rt REAL
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_history (
+                        ticker TEXT, name TEXT, side TEXT, quantity INTEGER, price INTEGER, amt INTEGER, reason TEXT, timestamp DATETIME
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_signals (
+                        ticker TEXT, name TEXT, action TEXT, quantity INTEGER, reason TEXT, status TEXT
+                    )
+                """)
+                
+                # Mock 데이터 삽입 (중복 방지용 INSERT OR REPLACE 사용)
+                cursor.execute("INSERT OR REPLACE INTO account_summary VALUES (?, ?, ?, ?)", (10000000, 3000000, 30.0, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                cursor.execute("INSERT OR REPLACE INTO portfolio_status VALUES (?, ?, ?, ?, ?, ?)", ("005930", "삼성전자", 10, 70000, 72000, 2.85))
+                cursor.execute("INSERT OR REPLACE INTO trade_history VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ("000660", "SK하이닉스", "BUY", 5, 120000, 600000, "전략 매수", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                cursor.execute("INSERT OR REPLACE INTO trade_signals VALUES (?, ?, ?, ?, ?, ?)", ("035720", "카카오", "BUY", 15, "테스트 시그널", "PENDING"))
+                conn.commit()
+
+                
+            with patch('summary_trader.send_telegram_message') as mock_send:
+                summary_trader.send_daily_summary_to_telegram()
+                
+                # 호출이 한 번 발생했는지 검증
+                self.assertTrue(mock_send.called)
+                sent_msg = mock_send.call_args[0][0]
+                
+                # 메시지 포맷과 키워드 포함 검증
+                self.assertIn("일일 마감 보고", sent_msg)
+                self.assertIn("삼성전자", sent_msg)
+                self.assertIn("SK하이닉스", sent_msg)
+                self.assertIn("카카오", sent_msg)
+                self.assertIn("총자산: 10,000,000원", sent_msg)
+                
+            print("\n[Test] summary_trader telegram message formatting verified successfully.")
+        finally:
+            import gc
+            gc.collect() # 가비지 컬렉터 강제 호출하여 DB 커넥션 파일 잠금 완전 해제 유도
+            try:
+                if os.path.exists(test_db):
+                    os.remove(test_db)
+            except PermissionError:
+                pass
+
+    def test_07_strategy_engine_report_formatting(self):
+        """Test strategy report message formatting in strategy_engine"""
+        from unittest.mock import patch
+        from strategy_engine import StrategyEngine
+        
+        engine = StrategyEngine()
+        scored_stocks = [
+            {"ticker": "005930", "name": "삼성전자", "total_score": 92.5, "price": 72000},
+            {"ticker": "000660", "name": "SK하이닉스", "total_score": 88.1, "price": 120000}
+        ]
+        buy_signals = [
+            {"ticker": "005930", "name": "삼성전자", "action": "BUY", "quantity": 10, "reason": "테스트 매수"}
+        ]
+        sell_signals = [
+            {"ticker": "035420", "name": "NAVER", "action": "SELL", "quantity": 5, "reason": "테스트 매도"}
+        ]
+        holdings = [
+            {"ticker": "000660", "name": "SK하이닉스", "profit_rate": 2.5}
+        ]
+        
+        with patch('strategy_engine.send_telegram_message') as mock_send:
+            engine._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
+            
+            self.assertTrue(mock_send.called)
+            sent_msg = mock_send.call_args[0][0]
+            
+            # 메시지 포맷과 키워드 포함 검증
+            self.assertIn("전략 엔진 리포트", sent_msg)
+            self.assertIn("삼성전자", sent_msg)
+            self.assertIn("SK하이닉스", sent_msg)
+            self.assertIn("NAVER", sent_msg)
+            self.assertIn("매수 시그널 1건", sent_msg)
+            self.assertIn("매도 시그널 1건", sent_msg)
+            self.assertIn("현재 보유 1종목", sent_msg)
+            
+        print("\n[Test] strategy_engine report message formatting verified successfully.")
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -5,6 +5,8 @@ import logging
 import sqlite3
 import pytz
 from datetime import datetime
+from telegram_utils import send_telegram_message
+
 
 # 1. 경로 및 시간 설정
 from config import STOCK_TRADER_DIR as BASE_DIR, DB_PATH
@@ -54,6 +56,8 @@ def run_trade():
                             if res.get("return_code") == 0 or res.get("status") == "success" or res.get("rt_cd") == "0":
                                 is_success = True
                         
+                        # 1.1 텔레그램 임포트 로컬 수행 또는 상단 수행 (여기서는 상단에 수행)
+                        
                         if is_success:
                             logger.info(f"✅ 주문 성공 판정: {sig['name']}")
                             # DB 기록
@@ -64,10 +68,42 @@ def run_trade():
                                                  (sig['ticker'], sig['name'], sig['action'], qty, 0, 0, sig['reason']))
                                     conn.commit()
                                 logger.info(f"✅ DB 기록 완료: {sig['name']}")
+                                
+                                # 텔레그램 매매 알림 전송
+                                action_emoji = "🟢" if sig['action'] == "BUY" else "🔴"
+                                action_text = "매수" if sig['action'] == "BUY" else "매도"
+                                trade_msg = (
+                                    f"{action_emoji} *[{action_text} 체결]*\n"
+                                    f"━━━━━━━━━━━━━━\n"
+                                    f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
+                                    f"🔢 *수량:* {qty:,}주\n"
+                                    f"💵 *단가:* 시장가 주문 (체결가 DB확인 필요)\n"
+                                    f"📋 *사유:* {sig['reason']}\n"
+                                    f"⏰ *시각:* {datetime.now(KST).strftime('%H:%M:%S')}\n"
+                                    f"━━━━━━━━━━━━━━"
+                                )
+                                try:
+                                    send_telegram_message(trade_msg)
+                                except Exception as tg_e:
+                                    logger.warning(f"텔레그램 알림 전송 실패 (매매는 정상 처리됨): {tg_e}")
                             except Exception as db_e:
                                 logger.error(f"❌ DB 업데이트 실패: {db_e}")
                         else:
                             logger.warning(f"⚠️ 주문 실패 또는 응답 형식 불일치: {sig['name']}")
+                            # 주문 실패 텔레그램 알림
+                            fail_msg = (
+                                f"⚠️ *[주문 실패]*\n"
+                                f"━━━━━━━━━━━━━━\n"
+                                f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
+                                f"🔢 *수량:* {qty:,}주\n"
+                                f"📡 *응답:* {str(res)[:200]}\n"
+                                f"━━━━━━━━━━━━━━"
+                            )
+                            try:
+                                send_telegram_message(fail_msg)
+                            except Exception as tg_e:
+                                logger.warning(f"실패 알림 전송 실패: {tg_e}")
+
                         
                         time.sleep(2) # 레이트 리밋 방지 (2초 대기)
                 

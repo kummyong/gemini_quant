@@ -41,6 +41,7 @@ def run_watchdog():
     # 프로세스 객체 보관용
     running_procs = {}
     last_strategy_run = None
+    last_summary_run = None
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -65,9 +66,28 @@ def run_watchdog():
                     subprocess.run([VENV_PYTHON, strategy_path], env=env, check=True)
                     log("✨ [Schedule] 전략 엔진 실행 완료")
                     last_strategy_run = today_str
-                    send_telegram_message("🤖 [전략] 오늘 자 전략 종목 선정이 완료되었습니다.")
+                    # 중복 방지를 위해 기존 제네릭 메시지는 주석 처리합니다. 상세 정보는 strategy_engine.py에서 직접 보냅니다.
+                    # send_telegram_message("🤖 [전략] 오늘 자 전략 종목 선정이 완료되었습니다.")
                 except Exception as e:
                     log(f"❌ [Schedule] 전략 엔진 실행 실패: {e}")
+
+        # [스케줄링] 일일 마감 보고 (매일 15:40:00 ~ 15:40:30 사이 한 번만)
+        if now.hour == 15 and now.minute == 40:
+            today_str = now.strftime("%Y-%m-%d")
+            if last_summary_run != today_str:
+                log("📅 [Schedule] 일일 마감 보고 전송")
+                try:
+                    subprocess.run(
+                        [VENV_PYTHON, "-c",
+                         f"import sys; sys.path.insert(0, '{os.path.join(BASE_DIR, 'stock_trader')}'); "
+                         f"from summary_trader import send_daily_summary_to_telegram; "
+                         f"send_daily_summary_to_telegram()"],
+                        env=env, check=True, timeout=30
+                    )
+                    last_summary_run = today_str
+                    log("✨ [Schedule] 일일 마감 보고 전송 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] 일일 마감 보고 전송 실패: {e}")
 
         for p_info in PROCESSES:
             p_path = p_info["path"]

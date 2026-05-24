@@ -12,6 +12,8 @@ from urllib3.util import Retry
 from bs4 import BeautifulSoup
 import re
 import time
+from telegram_utils import send_telegram_message
+
 
 # [설정] 경로 및 하이퍼파라미터
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -447,6 +449,20 @@ class StrategyEngine:
                     "quantity": stock["quantity"],  # 전량 매도
                     "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%)"
                 })
+            
+            # 긴급 텔레그램 알림: 글로벌 손절
+            try:
+                alert_msg = (
+                    f"🚨🚨🚨 *[긴급] 글로벌 손절 발동*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"📉 포트폴리오 전체 수익률: {total_portfolio_profit_rate:.2f}%\n"
+                    f"⚠️ 손절선: {self.HARD_STOP_LOSS}%\n"
+                    f"🔴 전 보유종목 {len(current_holdings)}건 전량 매도 시그널 생성\n"
+                    f"━━━━━━━━━━━━━━"
+                )
+                send_telegram_message(alert_msg)
+            except Exception as tg_e:
+                logger.warning(f"글로벌 손절 텔레그램 알림 전송 실패: {tg_e}")
             return sell_signals
 
         # 2. 개별 종목 리스크 검토
@@ -520,6 +536,63 @@ class StrategyEngine:
         except Exception as e:
             logger.error(f"시그널 업데이트 중 오류: {e}")
 
+    def _send_strategy_report(self, scored_stocks, buy_signals, sell_signals, holdings):
+        """전략 엔진 실행 결과를 텔레그램으로 전송"""
+        try:
+            now = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')
+            
+            # 1. 헤더
+            lines = [f"🤖 *[전략 엔진 리포트]*", f"⏰ {now}", "━━━━━━━━━━━━━━"]
+            
+            # 2. 상위 5종목 랭킹
+            lines.append("📊 *[오늘의 전략 종목 TOP 5]*")
+            top_5 = scored_stocks[:5]
+            for i, s in enumerate(top_5):
+                held = "📌" if s["ticker"] in [h["ticker"] for h in holdings] else "  "
+                lines.append(
+                    f"{i+1}. {held}{s['name']} ({s['ticker']}) "
+                    f"| 점수: {s['total_score']:.1f}"
+                )
+            lines.append("")
+            
+            # 3. 매도 시그널
+            if sell_signals:
+                lines.append(f"🔴 *[매도 시그널 {len(sell_signals)}건]*")
+                for s in sell_signals:
+                    lines.append(f"  · {s['name']} {s['quantity']:,}주")
+                    lines.append(f"    └ {s['reason']}")
+                lines.append("")
+            
+            # 4. 매수 시그널
+            if buy_signals:
+                lines.append(f"🟢 *[매수 시그널 {len(buy_signals)}건]*")
+                for b in buy_signals:
+                    lines.append(f"  · {b['name']} {b['quantity']:,}주")
+                    lines.append(f"    └ {b['reason']}")
+                lines.append("")
+            
+            # 5. 시그널 없음
+            if not sell_signals and not buy_signals:
+                lines.append("ℹ️ 금일 신규 매매 시그널 없음 (포트폴리오 유지)")
+                lines.append("")
+            
+            # 6. 현재 보유 현황 요약
+            if holdings:
+                lines.append(f"📂 *[현재 보유 {len(holdings)}종목]*")
+                for h in holdings:
+                    emoji = "📈" if h["profit_rate"] >= 0 else "📉"
+                    lines.append(
+                        f"  {emoji} {h['name']}: {h['profit_rate']:+.2f}%"
+                    )
+            
+            lines.append("━━━━━━━━━━━━━━")
+            
+            msg = "\n".join(lines)
+            send_telegram_message(msg)
+            logger.info("전략 리포트 텔레그램 전송 완료")
+        except Exception as e:
+            logger.error(f"전략 리포트 텔레그램 전송 실패: {e}")
+
     def run(self):
         """전략 실행 및 포트폴리오 관리 메인 프로세스"""
         logger.info("==========================================")
@@ -563,6 +636,9 @@ class StrategyEngine:
 
         # 5. DB 반영
         self.update_signals(buy_signals, sell_signals)
+        
+        # 6. 전략 결과 텔레그램 알림
+        self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
         
         logger.info("엔진 실행 완료")
         logger.info("==========================================")
