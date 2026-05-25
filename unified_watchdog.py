@@ -58,8 +58,11 @@ def run_watchdog():
     while True:
         now = datetime.now(KST)
         
-        # [스케줄링] 전략 엔진 실행 (매일 08:30:00 ~ 08:30:30 사이 한 번만)
-        if now.hour == 8 and now.minute == 30:
+        from stock_trader.korean_market_calendar import is_market_holiday
+        is_today_holiday = is_market_holiday(now)
+        
+        # [스케줄링] 전략 엔진 실행 (장 운영일 08:30:00 ~ 08:30:30 사이 한 번만)
+        if not is_today_holiday and now.hour == 8 and now.minute == 30:
             today_str = now.strftime("%Y-%m-%d")
             if last_strategy_run != today_str:
                 log("📅 [Schedule] 전략 엔진 자동 실행 시간 (08:30)")
@@ -73,8 +76,8 @@ def run_watchdog():
                 except Exception as e:
                     log(f"❌ [Schedule] 전략 엔진 실행 실패: {e}")
 
-        # [스케줄링] 일일 마감 보고 (매일 15:40:00 ~ 15:40:30 사이 한 번만)
-        if now.hour == 15 and now.minute == 40:
+        # [스케줄링] 일일 마감 보고 (장 운영일 15:40:00 ~ 15:40:30 사이 한 번만)
+        if not is_today_holiday and now.hour == 15 and now.minute == 40:
             today_str = now.strftime("%Y-%m-%d")
             if last_summary_run != today_str:
                 log("📅 [Schedule] 일일 마감 보고 전송")
@@ -94,7 +97,7 @@ def run_watchdog():
         # 주말 파라미터 자가 학습은 PC(Trainer Node)에서 처리하므로 모바일 스케줄은 제거함
 
         # [스케줄링] DART 공시 감시 (장중 매 30분 간격: 09:00, 09:30, 10:00, ..., 15:00)
-        if now.weekday() < 5 and 9 <= now.hour < 16:
+        if not is_today_holiday and 9 <= now.hour < 16:
             current_check_minute = now.hour * 60 + (now.minute // 30) * 30  # 30분 단위로 정규화
             if current_check_minute != last_dart_check_minute:
                 log("📡 [Schedule] DART 공시 감시 실행")

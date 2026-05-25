@@ -31,8 +31,11 @@ def run_trade():
     while True:
         try:
             now = datetime.now(KST)
-            # 장중 시간 (09:00 ~ 15:30)
-            if now.weekday() < 5 and (9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30)):
+            from korean_market_calendar import is_market_holiday
+            
+            # 장중 시간 (09:00 ~ 15:30) 이고 휴일이 아닌 경우
+            is_trading_time = (9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30))
+            if not is_market_holiday(now) and is_trading_time:
                 # 1. 매매 신호 로드
                 with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
