@@ -15,6 +15,8 @@ import time
 from telegram_utils import send_telegram_message
 from dart_api import DartAPI
 from dart_financial_scorer import DartFinancialScorer
+from db_repository import DbRepository
+from ipc_messenger import IpcPublisher
 
 # [설정] 경로 및 하이퍼파라미터
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,11 +74,12 @@ class StrategyEngine:
     from stock_universe import SAMPLE_TICKERS
     SAMPLE_DATA = SAMPLE_TICKERS
 
-    def __init__(self):
+    def __init__(self, db_repository: DbRepository = None, ipc_publisher: IpcPublisher = None):
         logger.info("중장기 전략 엔진(Strategy Engine) 초기화 중...")
+        self.repo = db_repository
+        self.publisher = ipc_publisher
         self.is_system_locked = False
         self.lock_reason = ""
-        self._init_db()
         self._init_session()
         self._init_dart()
         self._load_hyperparams()
