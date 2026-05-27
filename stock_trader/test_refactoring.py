@@ -276,7 +276,7 @@ class TestRefactoring(unittest.TestCase):
         self.assertIn("NAVER", sent_msg)
         self.assertIn("매수 시그널 1건", sent_msg)
         self.assertIn("매도 시그널 1건", sent_msg)
-        self.assertIn("현재 보유 1종목", sent_msg)
+        self.assertIn("보유 현황 요약", sent_msg)
         
         print("\n[Test] strategy_engine report message formatting verified successfully.")
 

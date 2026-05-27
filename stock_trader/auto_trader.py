@@ -5,7 +5,7 @@ import logging
 import sqlite3
 import pytz
 from datetime import datetime
-from telegram_utils import send_telegram_message
+from communication.telegram_utils import send_telegram_message
 
 
 # 1. 경로 및 시간 설정

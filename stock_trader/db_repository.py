@@ -49,26 +49,65 @@ class DbRepository:
             )
             """)
 
-            # 2. portfolio_status (중복 인덱스 제거 후 생성)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS portfolio_status (
-                stk_cd TEXT PRIMARY KEY,
-                stk_nm TEXT,
-                rmnd_qty INTEGER CHECK(rmnd_qty >= 0),
-                pur_pric INTEGER,
-                cur_prc INTEGER,
-                prft_rt REAL,
-                max_profit_rate REAL DEFAULT 0.0,
-                pred_sellq INTEGER DEFAULT 0,
-                tdy_sellq INTEGER DEFAULT 0,
-                last_updated DATETIME DEFAULT (datetime('now', 'localtime'))
-            )
-            """)
+            # 2. portfolio_status 테이블 체크 및 마이그레이션
+            cursor.execute("PRAGMA table_info(portfolio_status)")
+            cols = [col[1] for col in cursor.fetchall()]
+            
+            if len(cols) > 0 and "broker_id" not in cols:
+                logger.info("⚙️ portfolio_status 테이블에 broker_id 추가 마이그레이션 진행 중...")
+                # 기존 데이터 임시 백업 후 테이블 구조 재정의
+                cursor.execute("ALTER TABLE portfolio_status RENAME TO _portfolio_status_old")
+                cursor.execute("""
+                CREATE TABLE portfolio_status (
+                    broker_id TEXT NOT NULL DEFAULT 'KIWOOM',
+                    stk_cd TEXT NOT NULL,
+                    stk_nm TEXT,
+                    rmnd_qty INTEGER CHECK(rmnd_qty >= 0),
+                    pur_pric INTEGER,
+                    cur_prc INTEGER,
+                    prft_rt REAL,
+                    max_profit_rate REAL DEFAULT 0.0,
+                    pred_sellq INTEGER DEFAULT 0,
+                    tdy_sellq INTEGER DEFAULT 0,
+                    last_updated DATETIME DEFAULT (datetime('now', 'localtime')),
+                    PRIMARY KEY (broker_id, stk_cd)
+                )
+                """)
+                cursor.execute("""
+                INSERT INTO portfolio_status (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, pred_sellq, tdy_sellq, last_updated)
+                SELECT 'KIWOOM', stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, pred_sellq, tdy_sellq, last_updated FROM _portfolio_status_old
+                """)
+                cursor.execute("DROP TABLE _portfolio_status_old")
+                logger.info("✅ portfolio_status 테이블 마이그레이션 완료")
+            else:
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS portfolio_status (
+                    broker_id TEXT NOT NULL DEFAULT 'KIWOOM',
+                    stk_cd TEXT NOT NULL,
+                    stk_nm TEXT,
+                    rmnd_qty INTEGER CHECK(rmnd_qty >= 0),
+                    pur_pric INTEGER,
+                    cur_prc INTEGER,
+                    prft_rt REAL,
+                    max_profit_rate REAL DEFAULT 0.0,
+                    pred_sellq INTEGER DEFAULT 0,
+                    tdy_sellq INTEGER DEFAULT 0,
+                    last_updated DATETIME DEFAULT (datetime('now', 'localtime')),
+                    PRIMARY KEY (broker_id, stk_cd)
+                )
+                """)
 
-            # 3. trade_signals (PK를 Auto-increment ID로 변경하여 이력 보존)
+            # 3. trade_signals 테이블 체크 및 마이그레이션
+            cursor.execute("PRAGMA table_info(trade_signals)")
+            sig_cols = [col[1] for col in cursor.fetchall()]
+            if len(sig_cols) > 0 and "broker_id" not in sig_cols:
+                logger.info("⚙️ trade_signals 테이블에 broker_id 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE trade_signals ADD COLUMN broker_id TEXT DEFAULT 'KIWOOM'")
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_id TEXT DEFAULT 'KIWOOM',
                 ticker TEXT NOT NULL,
                 name TEXT NOT NULL,
                 action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL', 'HOLD')),
@@ -153,7 +192,6 @@ class DbRepository:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_timestamp ON trade_history (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_ts ON account_summary (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON system_metrics (timestamp)")
-            # 훈련 완료 데이터에 대한 부분 인덱스(Partial Index)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_training_untrained ON training_data (is_trained) WHERE is_trained = 0")
 
             # 하이퍼파라미터 초기 값 셋업
@@ -178,14 +216,14 @@ class DbRepository:
 
     # --- 데이터 엑세스 API 구현 ---
 
-    def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING') -> int:
+    def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM') -> int:
         """신규 트레이딩 시그널을 이력과 함께 삽입 (과거 데이터 보존 가능)"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (ticker, name, action, quantity, reason, status))
+                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status, broker_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, name, action, quantity, reason, status, broker_id))
             return cursor.lastrowid
 
     def expire_pending_signals(self):
@@ -199,24 +237,24 @@ class DbRepository:
         with self.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate FROM portfolio_status WHERE rmnd_qty > 0")
+            cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate FROM portfolio_status WHERE rmnd_qty > 0")
             return [dict(row) for row in cursor.fetchall()]
 
-    def update_portfolio_holding(self, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float, max_profit_rate: float):
+    def update_portfolio_holding(self, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float, max_profit_rate: float, broker_id: str = 'KIWOOM'):
         """보유 현황 업데이트 (Upsert 패턴)"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO portfolio_status (stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                ON CONFLICT(stk_cd) DO UPDATE SET
+                INSERT INTO portfolio_status (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(broker_id, stk_cd) DO UPDATE SET
                     rmnd_qty = excluded.rmnd_qty,
                     pur_pric = excluded.pur_pric,
                     cur_prc = excluded.cur_prc,
                     prft_rt = excluded.prft_rt,
                     max_profit_rate = excluded.max_profit_rate,
                     last_updated = excluded.last_updated
-            """, (stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate))
+            """, (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate))
 
     def get_strategy_hyperparams(self) -> dict:
         """전략 하이퍼파라미터 전량 조회"""

@@ -5,8 +5,8 @@ import logging
 from datetime import datetime
 
 # 기존 경로 설정 유지
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-DB_PATH = os.path.join(BASE_DIR, "logs/system_monitor.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "logs", "system_monitor.db")
 
 # 테스트를 위해 AutoTrader 클래스의 execute_order 로직만 추출하여 테스트 함수 구성
 def test_execute_order_logic(simulate_error=False):

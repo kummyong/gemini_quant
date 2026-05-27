@@ -4,8 +4,9 @@ import unittest
 from unittest.mock import patch
 
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-sys.path.append(BASE_DIR)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 
 from agent_skills import switch_ai_model, AVAILABLE_MODELS
 
