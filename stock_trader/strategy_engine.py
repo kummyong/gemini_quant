@@ -591,66 +591,54 @@ class StrategyEngine:
         except Exception as e:
             logger.error(f"보유 종목 API 조회 중 오류 (로컬 DB 백업으로 대체): {e}")
 
-        # 로컬 DB 연결 (timeout 적용)
         try:
-            with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
+            # API 조회 실패 시 로컬 DB에서 불러오기
+            if not api_success:
+                logger.info("Kiwoom API 조회 실패로 로컬 DB portfolio_status에서 보유 종목을 로드합니다.")
+                db_holdings = self.repo.get_portfolio_holdings()
+                for row in db_holdings:
+                    holdings.append({
+                        "ticker": row["stk_cd"].replace("A", ""),
+                        "name": row["stk_nm"],
+                        "profit_rate": float(row["prft_rt"]) if row["prft_rt"] is not None else 0.0,
+                        "quantity": int(row["rmnd_qty"]),
+                        "purchase_price": float(row["pur_pric"]) if row["pur_pric"] is not None else 0.0,
+                        "current_price": float(row["cur_prc"]) if row["cur_prc"] is not None else 0.0,
+                        "max_profit_rate": float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
+                    })
 
-                # API 조회 실패 시 로컬 DB에서 불러오기
-                if not api_success:
-                    logger.info("Kiwoom API 조회 실패로 로컬 DB portfolio_status에서 보유 종목을 로드합니다.")
-                    cursor.execute("SELECT stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate FROM portfolio_status WHERE rmnd_qty > 0")
-                    rows = cursor.fetchall()
-                    for row in rows:
-                        holdings.append({
-                            "ticker": row["stk_cd"].replace("A", ""),
-                            "name": row["stk_nm"],
-                            "profit_rate": float(row["prft_rt"]) if row["prft_rt"] is not None else 0.0,
-                            "quantity": int(row["rmnd_qty"]),
-                            "purchase_price": float(row["pur_pric"]) if row["pur_pric"] is not None else 0.0,
-                            "current_price": float(row["cur_prc"]) if row["cur_prc"] is not None else 0.0,
-                            "max_profit_rate": float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
-                        })
-
-                # 각 종목의 max_profit_rate를 추적 및 업데이트
-                for stock in holdings:
-                    ticker = stock["ticker"]
-                    current_profit = stock["profit_rate"]
-                    
-                    # DB에 저장된 이전 max_profit_rate 조회
-                    cursor.execute("SELECT max_profit_rate FROM portfolio_status WHERE stk_cd = ?", (ticker,))
-                    row = cursor.fetchone()
-                    
-                    stored_max_profit = float(row[0]) if row and row[0] is not None else 0.0
-                    
-                    # 고점 갱신 확인
-                    if current_profit > stored_max_profit:
-                        new_max_profit = current_profit
-                        logger.info(f"📈 [{stock['name']}] 고점 수익률 갱신: {stored_max_profit:.2f}% -> {new_max_profit:.2f}%")
-                    else:
-                        new_max_profit = stored_max_profit
-                    
-                    stock["max_profit_rate"] = new_max_profit
-                    
-                    # DB에 실시간 보유 현황 및 max_profit_rate 업데이트/저장
-                    cursor.execute("""
-                        INSERT INTO portfolio_status (stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, last_updated)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                        ON CONFLICT(stk_cd) DO UPDATE SET
-                            rmnd_qty = excluded.rmnd_qty,
-                            pur_pric = excluded.pur_pric,
-                            cur_prc = excluded.cur_prc,
-                            prft_rt = excluded.prft_rt,
-                            max_profit_rate = excluded.max_profit_rate,
-                            last_updated = excluded.last_updated
-                    """, (
-                        ticker, stock["name"], stock["quantity"], 
-                        stock.get("purchase_price", 0.0), stock.get("current_price", 0.0), 
-                        current_profit, new_max_profit
-                    ))
+            # 각 종목의 max_profit_rate를 추적 및 업데이트
+            db_holdings = self.repo.get_portfolio_holdings()
+            for stock in holdings:
+                ticker = stock["ticker"]
+                current_profit = stock["profit_rate"]
                 
-                conn.commit()
+                # DB에 저장된 이전 max_profit_rate 조회
+                stored_max_profit = 0.0
+                for row in db_holdings:
+                    if row["stk_cd"] == ticker:
+                        stored_max_profit = float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
+                        break
+                
+                # 고점 갱신 확인
+                if current_profit > stored_max_profit:
+                    new_max_profit = current_profit
+                    logger.info(f"📈 [{stock['name']}] 고점 수익률 갱신: {stored_max_profit:.2f}% -> {new_max_profit:.2f}%")
+                else:
+                    new_max_profit = stored_max_profit
+                
+                stock["max_profit_rate"] = new_max_profit
+                
+                # DB에 실시간 보유 현황 및 max_profit_rate 업데이트/저장
+                self.repo.update_portfolio_holding(
+                    stk_cd=ticker,
+                    stk_nm=stock["name"],
+                    rmnd_qty=stock["quantity"],
+                    pur_pric=stock.get("purchase_price", 0.0),
+                    cur_prc=stock.get("current_price", 0.0),
+                    prft_rt=current_profit,
+                    max_profit_rate=new_max_profit
+                )
         except Exception as db_e:
             logger.error(f"보유 종목 DB 동기화/갱신 중 오류 발생: {db_e}")
 
@@ -684,7 +672,7 @@ class StrategyEngine:
         if total_purchase_amt > 0:
             total_portfolio_profit_rate = ((total_eval_amt - total_purchase_amt) / total_purchase_amt) * 100
 
-        # 계좌 단위 절대 손절 (포트폴리오 전체 수익률이 -5.0% 이하로 내려가면 전체 종목 전량 청산)
+         # 계좌 단위 절대 손절 (포트폴리오 전체 수익률이 -5.0% 이하로 내려가면 전체 종목 전량 청산)
         if total_purchase_amt > 0 and total_portfolio_profit_rate <= self.HARD_STOP_LOSS:
             logger.critical(f"🚨 [글로벌 리스크] 계좌 전체 손실 한도 도달! (전체 수익률: {total_portfolio_profit_rate:.2f}%). 전량 청산(Hard Stop)을 단행합니다.")
             for stock in current_holdings:
@@ -696,19 +684,14 @@ class StrategyEngine:
                     "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%, 기준: {self.HARD_STOP_LOSS}%)"
                 })
             
-            # 긴급 텔레그램 알림: 글로벌 손절
+            # 긴급 IPC 알림: 글로벌 손절
             try:
-                alert_msg = (
-                    f"🚨🚨🚨 *[긴급] 글로벌 손절 발동*\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"📉 포트폴리오 전체 수익률: {total_portfolio_profit_rate:.2f}%\n"
-                    f"⚠️ 손절선: {self.HARD_STOP_LOSS}%\n"
-                    f"🔴 전 보유종목 {len(current_holdings)}건 전량 매도 시그널 생성\n"
-                    f"━━━━━━━━━━━━━━"
-                )
-                send_telegram_message(alert_msg)
+                self.publisher.send_message_sync("GLOBAL_STOP_LOSS", {
+                    "profit_rate": total_portfolio_profit_rate,
+                    "threshold": self.HARD_STOP_LOSS
+                })
             except Exception as tg_e:
-                logger.warning(f"글로벌 손절 텔레그램 알림 전송 실패: {tg_e}")
+                logger.warning(f"글로벌 손절 IPC 알림 전송 실패: {tg_e}")
             return sell_signals
 
         # 2. 개별 종목 리스크 검토
@@ -771,36 +754,54 @@ class StrategyEngine:
         return sell_signals
 
     def update_signals(self, buy_signals: List[Dict], sell_signals: List[Dict]):
-        """DB 트랜잭션 처리: 매도 시그널 우선 처리 후 매수 시그널 삽입 (timeout=30.0 적용)"""
+        """DB 트랜잭션 처리: 매도 시그널 우선 처리 후 매수 시그널 삽입 (DbRepository 경유)"""
         logger.info(f"데이터베이스 업데이트: 매도 {len(sell_signals)}건, 매수 {len(buy_signals)}건")
         try:
-            with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-                cursor = conn.cursor()
-                
-                # 기존 PENDING 시그널 만료
-                cursor.execute("UPDATE trade_signals SET status = 'EXPIRED' WHERE status = 'PENDING'")
+            # 기존 PENDING 시그널 만료
+            self.repo.expire_pending_signals()
 
-                # 매도 시그널 삽입 (최우선)
-                for s in sell_signals:
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO trade_signals (ticker, name, action, quantity, reason, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                    ''', (s["ticker"], s["name"], "SELL", s["quantity"], s["reason"], "PENDING"))
+            # 매도 시그널 삽입 및 IPC 발행 (최우선)
+            for s in sell_signals:
+                self.repo.save_trade_signal(
+                    ticker=s["ticker"],
+                    name=s["name"],
+                    action="SELL",
+                    quantity=s["quantity"],
+                    reason=s["reason"],
+                    status="PENDING"
+                )
+                self.publisher.send_message_sync("TRADE_SIGNAL", {
+                    "ticker": s["ticker"],
+                    "name": s["name"],
+                    "action": "SELL",
+                    "quantity": s["quantity"],
+                    "reason": s["reason"]
+                })
 
-                # 매수 시그널 삽입
-                for b in buy_signals:
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO trade_signals (ticker, name, action, quantity, reason, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                    ''', (b["ticker"], b["name"], "BUY", b["quantity"], b["reason"], "PENDING"))
-                
-                conn.commit()
-            logger.info("모든 매매 시그널이 DB에 성공적으로 반영되었습니다.")
+            # 매수 시그널 삽입 및 IPC 발행
+            for b in buy_signals:
+                self.repo.save_trade_signal(
+                    ticker=b["ticker"],
+                    name=b["name"],
+                    action="BUY",
+                    quantity=b["quantity"],
+                    reason=b["reason"],
+                    status="PENDING"
+                )
+                self.publisher.send_message_sync("TRADE_SIGNAL", {
+                    "ticker": b["ticker"],
+                    "name": b["name"],
+                    "action": "BUY",
+                    "quantity": b["quantity"],
+                    "reason": b["reason"]
+                })
+            
+            logger.info("모든 매매 시그널이 DB에 성공적으로 반영되었으며 IPC로 발송되었습니다.")
         except Exception as e:
             logger.error(f"시그널 업데이트 중 오류: {e}")
 
     def _send_strategy_report(self, scored_stocks, buy_signals, sell_signals, holdings):
-        """전략 엔진 실행 결과를 텔레그램으로 전송"""
+        """전략 엔진 실행 결과를 IPC 리포트로 전송"""
         try:
             now = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')
             
@@ -860,10 +861,10 @@ class StrategyEngine:
             lines.append("━━━━━━━━━━━━━━")
             
             msg = "\n".join(lines)
-            send_telegram_message(msg)
-            logger.info("전략 리포트 텔레그램 전송 완료")
+            self.publisher.send_message_sync("STRATEGY_REPORT", {"message": msg})
+            logger.info("전략 리포트 IPC 전송 완료")
         except Exception as e:
-            logger.error(f"전략 리포트 텔레그램 전송 실패: {e}")
+            logger.error(f"전략 리포트 IPC 전송 실패: {e}")
 
     def run(self):
         """전략 실행 및 포트폴리오 관리 메인 프로세스"""
@@ -955,5 +956,7 @@ class StrategyEngine:
         logger.info("==========================================")
 
 if __name__ == "__main__":
-    engine = StrategyEngine()
+    repo = DbRepository(DB_PATH)
+    publisher = IpcPublisher()
+    engine = StrategyEngine(db_repository=repo, ipc_publisher=publisher)
     engine.run()

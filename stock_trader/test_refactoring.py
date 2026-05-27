@@ -245,10 +245,11 @@ class TestRefactoring(unittest.TestCase):
 
     def test_07_strategy_engine_report_formatting(self):
         """Test strategy report message formatting in strategy_engine"""
-        from unittest.mock import patch
+        from unittest.mock import patch, MagicMock
         from strategy_engine import StrategyEngine
         
         engine = StrategyEngine()
+        engine.publisher = MagicMock()
         scored_stocks = [
             {"ticker": "005930", "name": "삼성전자", "total_score": 92.5, "price": 72000},
             {"ticker": "000660", "name": "SK하이닉스", "total_score": 88.1, "price": 120000}
@@ -263,21 +264,20 @@ class TestRefactoring(unittest.TestCase):
             {"ticker": "000660", "name": "SK하이닉스", "profit_rate": 2.5}
         ]
         
-        with patch('strategy_engine.send_telegram_message') as mock_send:
-            engine._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
-            
-            self.assertTrue(mock_send.called)
-            sent_msg = mock_send.call_args[0][0]
-            
-            # 메시지 포맷과 키워드 포함 검증
-            self.assertIn("전략 엔진 리포트", sent_msg)
-            self.assertIn("삼성전자", sent_msg)
-            self.assertIn("SK하이닉스", sent_msg)
-            self.assertIn("NAVER", sent_msg)
-            self.assertIn("매수 시그널 1건", sent_msg)
-            self.assertIn("매도 시그널 1건", sent_msg)
-            self.assertIn("현재 보유 1종목", sent_msg)
-            
+        engine._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
+        
+        self.assertTrue(engine.publisher.send_message_sync.called)
+        sent_msg = engine.publisher.send_message_sync.call_args[0][1]["message"]
+        
+        # 메시지 포맷과 키워드 포함 검증
+        self.assertIn("전략 엔진 리포트", sent_msg)
+        self.assertIn("삼성전자", sent_msg)
+        self.assertIn("SK하이닉스", sent_msg)
+        self.assertIn("NAVER", sent_msg)
+        self.assertIn("매수 시그널 1건", sent_msg)
+        self.assertIn("매도 시그널 1건", sent_msg)
+        self.assertIn("현재 보유 1종목", sent_msg)
+        
         print("\n[Test] strategy_engine report message formatting verified successfully.")
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import sys
 import json
 import subprocess
 try:
@@ -7,12 +7,18 @@ try:
 except (ImportError, NotImplementedError):
     psutil = None
 from datetime import datetime, timedelta, timezone
-from telegram_utils import send_telegram_message
+
+# stock_trader 경로 추가
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from config import DB_PATH
+from db_repository import DbRepository
+from ipc_messenger import IpcPublisher
 
 # 한국 시간(KST) 설정 (UTC+9)
 KST = timezone(timedelta(hours=9))
-
-from config import DB_PATH
 
 def get_system_metrics():
     # 1. CPU Percent (인터벌을 늘려 정확도 향상)
@@ -31,16 +37,8 @@ def get_system_metrics():
         mem_used_kb = 0
         mem_available_kb = 0
     
-    # 3. Battery Info (시스템 권한 및 PRoot 환경 이슈로 비활성화)
+    # 3. Battery Info
     battery_level = "N/A"
-    # try:
-    #     # 타임아웃을 짧게 주어 루프가 멈추는 것 방지
-    #     res = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=1)
-    #     if res.returncode == 0:
-    #         batt_data = json.loads(res.stdout)
-    #         battery_level = f"{batt_data.get('percentage', '확인불가')}%"
-    # except:
-    #     pass
 
     # 4. Temperature (CPU 온도 시도)
     cpu_temp = "N/A"
@@ -72,38 +70,6 @@ def get_system_metrics():
         "mem_usage_pct": mem_usage_pct
     }
 
-def save_to_db(metrics):
-    try:
-        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            # 테이블 컬럼 추가 여부 확인 후 저장
-            cursor.execute("PRAGMA table_info(system_metrics)")
-            columns = [column[1] for column in cursor.fetchall()]
-            
-            # 필요한 컬럼이 없으면 추가 (배터리, 온도 등)
-            if "cpu_usage" not in columns:
-                cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_usage REAL")
-            if "battery_level" not in columns:
-                cursor.execute("ALTER TABLE system_metrics ADD COLUMN battery_level TEXT")
-            if "cpu_temp" not in columns:
-                cursor.execute("ALTER TABLE system_metrics ADD COLUMN cpu_temp TEXT")
-                
-            cursor.execute("""
-                INSERT INTO system_metrics (
-                    timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp,
-                    mem_total_kb, mem_used_kb, mem_available_kb, mem_usage_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                metrics["timestamp"], metrics["cpu_load_1m"], metrics["cpu_usage"], 
-                str(metrics["battery_level"]), str(metrics["cpu_temp"]),
-                metrics["mem_total_kb"], metrics["mem_used_kb"], metrics["mem_available_kb"], metrics["mem_usage_pct"]
-            ))
-            conn.commit()
-        return True
-    except Exception as e:
-        print(f"❌ [DB] 저장 오류: {e}")
-        return False
-
 def format_metrics_message(metrics):
     # ResponseFormatter와 유사한 형식으로 직접 보고서 생성 (독립 실행용)
     emoji = "✅" if metrics["cpu_usage"] < 80 else "⚠️"
@@ -118,14 +84,38 @@ def format_metrics_message(metrics):
     return msg
 
 if __name__ == "__main__":
-    import sys
     silent = "--silent" in sys.argv
     metrics = get_system_metrics()
-    if save_to_db(metrics):
+    
+    # 1. DbRepository를 사용하여 데이터 저장
+    repo = DbRepository(DB_PATH)
+    try:
+        repo.save_system_metric(
+            timestamp=metrics["timestamp"],
+            cpu_load_1m=metrics["cpu_load_1m"],
+            cpu_usage=metrics["cpu_usage"],
+            battery_level=metrics["battery_level"],
+            cpu_temp=str(metrics["cpu_temp"]),
+            mem_total=metrics["mem_total_kb"],
+            mem_used=metrics["mem_used_kb"],
+            mem_avail=metrics["mem_available_kb"],
+            mem_pct=metrics["mem_usage_pct"]
+        )
+        save_success = True
+    except Exception as e:
+        print(f"❌ [DB] 저장 오류: {e}")
+        save_success = False
+
+    if save_success:
         if not silent:
+            # 2. IpcPublisher를 통해 알림 이벤트 전송 (직접 텔레그램 전송 대체)
             message = format_metrics_message(metrics)
-            send_telegram_message(message)
-            print("✅ 메트릭 수집 및 전송 완료.")
+            publisher = IpcPublisher()
+            sent = publisher.send_message_sync("SYSTEM_ALERT", {"message": message})
+            if sent:
+                print("✅ 메트릭 수집 및 IPC 이벤트 발송 완료.")
+            else:
+                print("⚠️ 메트릭 저장 완료되었으나 IPC 전송 실패.")
         else:
             print(f"📊 메트릭 수집 및 DB 저장 완료 ({metrics['timestamp']})")
     else:
