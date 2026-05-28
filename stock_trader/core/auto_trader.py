@@ -33,11 +33,16 @@ def get_cached_atr_pct(ticker: str) -> float:
     if ticker in ATR_CACHE:
         return ATR_CACHE[ticker]
     try:
-        import FinanceDataReader as fdr
         import pandas as pd
-        from datetime import datetime, timedelta
-        # 30일치 데이터로 14일 ATR 계산
-        df = fdr.DataReader(ticker, start=(datetime.now(KST) - timedelta(days=40)).strftime('%Y-%m-%d'))
+        from stock_trader.data.db_repository import DbRepository
+        repo = DbRepository(DB_PATH)
+        df = repo.get_recent_ohlcv(ticker, limit=40)
+        
+        if df.empty or len(df) < 15:
+            import FinanceDataReader as fdr
+            from datetime import datetime, timedelta
+            df = fdr.DataReader(ticker, start=(datetime.now(KST) - timedelta(days=40)).strftime('%Y-%m-%d'))
+            
         if not df.empty and len(df) >= 15:
             closes = df['Close']
             highs = df['High']
@@ -46,7 +51,7 @@ def get_cached_atr_pct(ticker: str) -> float:
             atr = tr.rolling(window=14).mean().iloc[-1]
             atr_pct = (atr / closes.iloc[-1]) * 100
             ATR_CACHE[ticker] = atr_pct
-            logger.info(f"📋 Cached ATR for {ticker}: {atr_pct:.2f}%")
+            logger.info(f"📋 Cached ATR for {ticker} (using DB/FDR): {atr_pct:.2f}%")
             return atr_pct
     except Exception as e:
         logger.warning(f"⚠️ ATR 계산 실패 ({ticker}): {e}")

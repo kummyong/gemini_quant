@@ -184,6 +184,21 @@ class DbRepository:
             )
             """)
 
+            # 9. ohlcv_data (로컬 시계열 데이터 캐싱)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ohlcv_data (
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open INTEGER,
+                high INTEGER,
+                low INTEGER,
+                close INTEGER,
+                volume INTEGER,
+                change REAL,
+                PRIMARY KEY (ticker, date)
+            )
+            """)
+
             # --- 인덱스 설정 최적화 ---
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks (status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time ON scheduled_tasks (scheduled_at)")
@@ -272,3 +287,72 @@ class DbRepository:
                 (timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp, mem_total_kb, mem_used_kb, mem_available_kb, mem_usage_pct)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp, mem_total, mem_used, mem_avail, mem_pct))
+
+    def sync_ohlcv_data(self, ticker: str, force_full: bool = False):
+        """웹에서 종목의 최신 OHLCV 데이터를 조회하여 DB에 차분(Delta) 병합합니다."""
+        try:
+            import FinanceDataReader as fdr
+            from datetime import datetime, timedelta
+            import pytz
+            
+            KST = pytz.timezone('Asia/Seoul')
+            now = datetime.now(KST)
+            
+            start_date = (now - timedelta(days=200)).strftime('%Y-%m-%d')
+            
+            if not force_full:
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT MAX(date) FROM ohlcv_data WHERE ticker = ?", (ticker,))
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        # 최신 날짜가 오늘과 같다면 조회를 생략하지 않고 갱신(당일 데이터 갱신을 위함)
+                        # 단, 시작일을 최근 저장된 날짜부터 가져옴
+                        last_date = datetime.strptime(row[0], '%Y-%m-%d')
+                        # 최소 3영업일 전 데이터부터 다시 받아서 수정치(수정주가 등)나 오늘 장중 데이터를 덮어씀
+                        start_date = (last_date - timedelta(days=3)).strftime('%Y-%m-%d')
+            
+            df = fdr.DataReader(ticker, start=start_date)
+            if df.empty:
+                return
+                
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for idx, row in df.iterrows():
+                    date_str = idx.strftime('%Y-%m-%d')
+                    _open = int(row.get('Open', 0))
+                    _high = int(row.get('High', 0))
+                    _low = int(row.get('Low', 0))
+                    _close = int(row.get('Close', 0))
+                    _volume = int(row.get('Volume', 0))
+                    _change = float(row.get('Change', 0.0))
+                    
+                    cursor.execute("""
+                        INSERT INTO ohlcv_data (ticker, date, open, high, low, close, volume, change)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(ticker, date) DO UPDATE SET
+                            open = excluded.open,
+                            high = excluded.high,
+                            low = excluded.low,
+                            close = excluded.close,
+                            volume = excluded.volume,
+                            change = excluded.change
+                    """, (ticker, date_str, _open, _high, _low, _close, _volume, _change))
+        except Exception as e:
+            logger.error(f"[{ticker}] OHLCV 동기화 중 오류: {e}")
+
+    def get_recent_ohlcv(self, ticker: str, limit: int = 150):
+        """DB에서 가장 최신 OHLCV 데이터를 Pandas DataFrame으로 반환합니다."""
+        import pandas as pd
+        with self.get_connection() as conn:
+            query = f"SELECT date as Date, open as Open, high as High, low as Low, close as Close, volume as Volume, change as Change FROM ohlcv_data WHERE ticker = '{ticker}' ORDER BY date DESC LIMIT {limit}"
+            df = pd.read_sql_query(query, conn)
+            if df.empty:
+                return df
+            
+            # 날짜순 정렬 (과거 -> 최신)
+            df = df.sort_values('Date').reset_index(drop=True)
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            return df
+

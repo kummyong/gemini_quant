@@ -295,43 +295,38 @@ class StrategyEngine:
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
-
-    def _get_industry_map(self) -> Dict[str, float]:
-        url = "https://finance.naver.com/sise/sise_group.naver?type=upjong"
-        try:
-            res = self.session.get(url, verify=False, timeout=10)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'lxml')
-            table = soup.find('table', class_='type_1')
-            ind_map = {}
-            if table:
-                for tr in table.find_all('tr'):
-                    tds = tr.find_all('td')
-                    if len(tds) >= 2:
-                        name = tds[0].get_text(strip=True)
-                        change_str = tds[1].get_text(strip=True).replace('%', '')
-                        try:
-                            change_val = float(change_str)
-                            ind_map[name] = change_val
-                        except ValueError:
-                            pass
-            return ind_map
-        except Exception as e:
-            logger.error(f"업종 맵 수집 중 오류 발생: {e}")
-            return {}
-
     def fetch_market_data(self) -> List[Dict]:
         logger.info("실제 시장 데이터 수집 시작...")
         sample_data = self.SAMPLE_DATA
-        industry_map = self._get_industry_map()
-        
-        real_stocks = []
+        raw_stocks_data = []
         for ticker, name in sample_data:
+            df_hist = pd.DataFrame()
+            try:
+                if self.repo:
+                    self.repo.sync_ohlcv_data(ticker)
+                    df_hist = self.repo.get_recent_ohlcv(ticker, limit=150)
+            except Exception as db_e:
+                logger.error(f"[{name}] DB 동기화 또는 조회 중 오류: {db_e}")
+                
+            if df_hist.empty:
+                try:
+                    import FinanceDataReader as fdr
+                    import datetime
+                    df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=150)).strftime('%Y-%m-%d'))
+                except Exception as fdr_e:
+                    logger.error(f"[{name}] FinanceDataReader 조회 실패: {fdr_e}")
+            
+            raw_stocks_data.append((ticker, name, df_hist))
+            time.sleep(0.1) # Termux 리소스 방어용 짧은 대기
+
+        real_stocks = []
+        for ticker, name, df_hist in raw_stocks_data:
             eps_growth = 0.0
-            industry_score = 50.0
+            industry_name = "기타"
             net_buying = 0.0
             current_price = 0.0
             
+            # Naver crawling for fundamental data
             try:
                 main_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
                 res = self.session.get(main_url, verify=False, timeout=10)
@@ -340,10 +335,7 @@ class StrategyEngine:
                 
                 match = re.search(r'업종명\s*:\s*<a[^>]*>([^<]+)</a>', res.text)
                 if match:
-                    ind_name = match.group(1).strip()
-                    change_rate = industry_map.get(ind_name, 0.0)
-                    score = 57.5 + change_rate * 7.5
-                    industry_score = max(20.0, min(95.0, score))
+                    industry_name = match.group(1).strip()
                 
                 div = soup.find('div', class_='section cop_analysis')
                 if div:
@@ -379,6 +371,11 @@ class StrategyEngine:
             except Exception as e:
                 logger.error(f"[{name}] 메인 정보 파싱 실패: {e}")
                 
+            # Fallback for current price from local DB hist
+            if current_price == 0.0 and not df_hist.empty:
+                current_price = float(df_hist['Close'].iloc[-1])
+                logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
+
             try:
                 frgn_url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
                 res = self.session.get(frgn_url, verify=False, timeout=10)
@@ -440,10 +437,13 @@ class StrategyEngine:
             is_bottoming = True
             relative_momentum = 0.0
             atr_pct = 3.0
+            
+            is_aligned = False
+            is_under_ma120 = False
+            is_vcp = False
+            return_5d = 0.0
+            
             try:
-                import FinanceDataReader as fdr
-                # 90일 수익률 및 50일 MA, 14일 ATR 계산을 위해 150일 데이터 다운로드
-                df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=150)).strftime('%Y-%m-%d'))
                 if not df_hist.empty and len(df_hist) >= 20:
                     closes = df_hist['Close']
                     
@@ -454,7 +454,6 @@ class StrategyEngine:
                     rs = gain / (loss + 1e-9)
                     rsi_series = 100 - (100 / (1 + rs))
                     rsi_val = float(rsi_series.iloc[-1])
-                    rsi_val_prev = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else rsi_val
                     
                     # 2. 볼린저 밴드
                     ma20 = closes.rolling(window=20).mean()
@@ -469,7 +468,6 @@ class StrategyEngine:
                     signal = macd.ewm(span=9, adjust=False).mean()
                     macd_hist = macd - signal
                     
-                    # 최근 2거래일간 MACD 히스토그램이 반등하고 있거나 MACD가 Signal 선을 넘어선 경우 bottoming으로 인정
                     if len(macd_hist) >= 2:
                         is_bottoming = (macd_hist.iloc[-1] > macd_hist.iloc[-2]) or (macd.iloc[-1] > signal.iloc[-1])
                     else:
@@ -489,14 +487,40 @@ class StrategyEngine:
                     atr_val = tr.rolling(window=14).mean().iloc[-1]
                     atr_pct = (atr_val / closes.iloc[-1]) * 100 if closes.iloc[-1] > 0 else 3.0
                     
+                    # 6. 이동평균선 정배열/역배열
+                    df_hist['MA20'] = closes.rolling(window=20).mean()
+                    df_hist['MA60'] = closes.rolling(window=60).mean()
+                    df_hist['MA120'] = closes.rolling(window=120).mean()
+                    
+                    if len(closes) >= 120:
+                        ma20_val = df_hist['MA20'].iloc[-1]
+                        ma60_val = df_hist['MA60'].iloc[-1]
+                        ma120_val = df_hist['MA120'].iloc[-1]
+                        is_aligned = (ma20_val > ma60_val) and (ma60_val > ma120_val)
+                        is_under_ma120 = current_price < ma120_val
+                    
+                    # 7. VCP (거래량 급감 필터)
+                    df_hist['Vol_MA20'] = df_hist['Volume'].rolling(window=20).mean()
+                    if len(closes) >= 20:
+                        avg_vol20 = df_hist['Vol_MA20'].iloc[-1]
+                        today_vol = df_hist['Volume'].iloc[-1]
+                        if (current_price <= lower_band * 1.01) and (today_vol < 0.6 * avg_vol20):
+                            is_vcp = True
+                            
+                    # 8. 5일 수익률 (섹터 모멘텀용)
+                    if len(closes) >= 6:
+                        return_5d = ((closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6]) * 100
+                    else:
+                        return_5d = 0.0
+                        
             except Exception as tech_e:
                 logger.warning(f"[{name}] 기술 지표 계산 실패: {tech_e}")
-
+ 
             real_stocks.append({
                 "ticker": ticker,
                 "name": name,
                 "eps_growth": eps_growth,
-                "industry_score": industry_score,
+                "industry_name": industry_name,
                 "net_buying": net_buying,
                 "price": current_price,
                 "dart_revenue_growth": dart_revenue_growth,
@@ -511,9 +535,36 @@ class StrategyEngine:
                 "upper_band": upper_band,
                 "is_bottoming": is_bottoming,
                 "relative_momentum": relative_momentum,
-                "atr_pct": atr_pct
+                "atr_pct": atr_pct,
+                "is_aligned": is_aligned,
+                "is_under_ma120": is_under_ma120,
+                "is_vcp": is_vcp,
+                "return_5d": return_5d,
+                "industry_score": 50.0
             })
-            time.sleep(0.5)
+            time.sleep(0.1)
+            
+        # 주간(5일) 섹터 모멘텀 계산
+        try:
+            industry_groups = {}
+            for s in real_stocks:
+                ind = s["industry_name"]
+                if ind not in industry_groups:
+                    industry_groups[ind] = []
+                industry_groups[ind].append(s["return_5d"])
+                
+            industry_momentum = {}
+            for ind, returns in industry_groups.items():
+                industry_momentum[ind] = sum(returns) / len(returns)
+                
+            for s in real_stocks:
+                ind = s["industry_name"]
+                avg_ret_5d = industry_momentum.get(ind, 0.0)
+                score = 57.5 + avg_ret_5d * 5.0
+                s["industry_score"] = max(20.0, min(95.0, score))
+                logger.info(f"📂 [{s['name']}] 업종: {ind} | 5일 섹터 모멘텀: {avg_ret_5d:+.2f}% | 업종 점수: {s['industry_score']:.1f}")
+        except Exception as sec_e:
+            logger.error(f"주간 섹터 모멘텀 계산 오류: {sec_e}")
             
         return real_stocks
 
@@ -563,6 +614,18 @@ class StrategyEngine:
             rel_mom = stock.get("relative_momentum", 0.0)
             if rel_mom > 0:
                 final_score += min(10.0, rel_mom * 0.1)
+                
+            # 120일 이평선 하회(장기 역배열) 감점
+            if stock.get("is_under_ma120", False):
+                final_score -= 15.0
+            # 20-60-120일 정배열 가점
+            elif stock.get("is_aligned", False):
+                final_score += 5.0
+                
+            # BB 하단 부근 거래량 급감 (VCP) 가점
+            if stock.get("is_vcp", False):
+                final_score += 10.0
+                logger.info(f"✨ [{stock['name']}] BB 하단 거래량 급감 (VCP 패턴) 포착! 가점 10점 부여")
             
             stock["total_score"] = round(final_score, 2)
         
@@ -708,24 +771,29 @@ class StrategyEngine:
             rsi_val = s_data.get("rsi", 50.0)
             upper_band = s_data.get("upper_band", 999999999.0)
             
-            if profit <= self.HARD_STOP_LOSS:
+            # 종목별 변동성(ATR%) 로드하여 동적 손절선/트레일링스탑 계산 (Chandelier Exit)
+            atr_pct = s_data.get("atr_pct", 3.0)
+            dynamic_hard_stop = -max(3.0, min(8.0, 1.5 * atr_pct))
+            dynamic_trailing_stop = max(2.0, min(5.0, 1.5 * atr_pct))
+            
+            if profit <= dynamic_hard_stop:
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%, 기준: {self.HARD_STOP_LOSS}%)"
+                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%, 기준: {dynamic_hard_stop:.2f}%)"
                 })
-                logger.warning(f"⚠️ [{b_id}][개별 손절] {stock['name']} 절대 손절선 도달로 전량 청산 (수익률: {profit:.2f}%)")
-            elif max_profit >= 2.0 and (max_profit - profit) >= self.TRAILING_STOP_DROP:
+                logger.warning(f"⚠️ [{b_id}][개별 손절] {stock['name']} 절대 손절선 도달로 전량 청산 (수익률: {profit:.2f}%, ATR 기준: {dynamic_hard_stop:.2f}%)")
+            elif max_profit >= 2.0 and (max_profit - profit) >= dynamic_trailing_stop:
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {self.TRAILING_STOP_DROP}%p)"
+                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {dynamic_trailing_stop:.2f}%p)"
                 })
                 logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
             elif rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band:
