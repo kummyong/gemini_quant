@@ -19,9 +19,9 @@ sys.path.append(str(project_root))
 sys.path.append(str(stock_trader_dir))
 
 from unittest.mock import patch, MagicMock
-from broker_factory import BrokerFactory
-from db_repository import DbRepository
-from strategy_engine import StrategyEngine
+from stock_trader.broker.broker_factory import BrokerFactory
+from stock_trader.data.db_repository import DbRepository
+from stock_trader.core.strategy_engine import StrategyEngine
 
 class MultiBrokerTests(unittest.TestCase):
     def setUp(self):
@@ -64,8 +64,10 @@ class MultiBrokerTests(unittest.TestCase):
         self.assertTrue(hasattr(korea, "get_account_summary"))
         self.assertTrue(hasattr(nh, "get_account_summary"))
 
-    @patch("broker_factory.BrokerFactory.get_broker")
-    def test_fetch_current_holdings(self, mock_get_broker):
+    @patch("stock_trader.broker.broker_factory.BrokerFactory.get_active_brokers")
+    @patch("stock_trader.broker.broker_factory.BrokerFactory.get_broker")
+    def test_fetch_current_holdings(self, mock_get_broker, mock_get_active_brokers):
+        mock_get_active_brokers.return_value = ["KIWOOM", "KOREA_INVEST", "NH_INVEST"]
         # Make the brokers raise Exception on get_account_summary to force DB fallback
         mock_broker = MagicMock()
         mock_broker.get_account_summary.side_effect = Exception("API offline")

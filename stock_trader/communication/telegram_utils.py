@@ -3,7 +3,11 @@ import requests
 from dotenv import load_dotenv
 
 # .env 파일 로드 (부모 디렉토리 또는 현재 디렉토리)
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+env_path = os.path.join(parent_dir, '.env')
+if not os.path.exists(env_path):
+    env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path)
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')

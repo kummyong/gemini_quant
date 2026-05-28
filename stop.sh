@@ -9,5 +9,6 @@ pkill -f auto_trader.py
 pkill -f telegram_listener.py
 pkill -f system_monitor_loop.py
 pkill -f auto_sync_history.py
+pkill -f notification_gateway.py
 
 echo "✅ 모든 프로세스가 종료되었습니다."

@@ -24,3 +24,8 @@ DB_PATH = os.path.join(LOG_DIR, "system_monitor.db")
 
 # 학습 모델 경로
 MODEL_PATH = os.path.join(LOG_DIR, "intent_model.pkl")
+
+# 런타임 데이터 디렉토리
+RUNTIME_DIR = os.path.join(STOCK_TRADER_DIR, "runtime")
+os.makedirs(RUNTIME_DIR, exist_ok=True)
+

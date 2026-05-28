@@ -11,14 +11,11 @@ import sqlite3
 from datetime import datetime
 import pytz
 
-# 경로 설정
-from config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH
-sys.path.append(BASE_DIR)
-
-from telegram_utils import TOKEN, CHAT_ID
-from local_intent_router import get_local_decision, get_top_n_decisions, router
-from agent_skills import skill_router, save_training_feedback, SYSTEM_TOOLS
-from trainer import retrain_model
+from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, RUNTIME_DIR
+from stock_trader.communication.telegram_utils import TOKEN, CHAT_ID
+from stock_trader.ai.local_intent_router import get_local_decision, get_top_n_decisions, router
+from stock_trader.ai.agent_skills import skill_router, save_training_feedback, SYSTEM_TOOLS
+from stock_trader.core.trainer import retrain_model
 
 # 타임존 및 로깅 설정
 KST = pytz.timezone('Asia/Seoul')
@@ -50,7 +47,7 @@ INTENT_NAMES = {
 }
 
 # 전역 상태 관리
-CONTEXT_FILE = os.path.join(BASE_DIR, "context.json")
+CONTEXT_FILE = os.path.join(RUNTIME_DIR, "context.json")
 last_interaction = {
     "text": None, "intent": None, "params": {}, "timestamp": 0, "state": None, 
     "all_candidates": [], "current_options": [], "page": 0
