@@ -103,6 +103,9 @@ class DbRepository:
             if len(sig_cols) > 0 and "broker_id" not in sig_cols:
                 logger.info("⚙️ trade_signals 테이블에 broker_id 컬럼 추가 중...")
                 cursor.execute("ALTER TABLE trade_signals ADD COLUMN broker_id TEXT DEFAULT 'KIWOOM'")
+            if len(sig_cols) > 0 and "features" not in sig_cols:
+                logger.info("⚙️ trade_signals 테이블에 features 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE trade_signals ADD COLUMN features TEXT")
 
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_signals (
@@ -114,11 +117,18 @@ class DbRepository:
                 quantity INTEGER DEFAULT 0 CHECK(quantity >= 0),
                 reason TEXT,
                 status TEXT DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'DONE', 'CANCELLED', 'EXPIRED')),
-                created_at DATETIME DEFAULT (datetime('now', 'localtime'))
+                created_at DATETIME DEFAULT (datetime('now', 'localtime')),
+                features TEXT
             )
             """)
 
             # 4. trade_history
+            cursor.execute("PRAGMA table_info(trade_history)")
+            hist_cols = [col[1] for col in cursor.fetchall()]
+            if len(hist_cols) > 0 and "features" not in hist_cols:
+                logger.info("⚙️ trade_history 테이블에 features 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE trade_history ADD COLUMN features TEXT")
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +139,8 @@ class DbRepository:
                 quantity INTEGER,
                 price INTEGER,
                 amt INTEGER,
-                reason TEXT
+                reason TEXT,
+                features TEXT
             )
             """)
 
@@ -231,14 +242,14 @@ class DbRepository:
 
     # --- 데이터 엑세스 API 구현 ---
 
-    def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM') -> int:
+    def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM', features: str = None) -> int:
         """신규 트레이딩 시그널을 이력과 함께 삽입 (과거 데이터 보존 가능)"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status, broker_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (ticker, name, action, quantity, reason, status, broker_id))
+                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status, broker_id, features)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, name, action, quantity, reason, status, broker_id, features))
             return cursor.lastrowid
 
     def expire_pending_signals(self):

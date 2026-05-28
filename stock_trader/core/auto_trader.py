@@ -4,6 +4,7 @@ import time
 import logging
 import sqlite3
 import pytz
+import json
 from datetime import datetime
 from stock_trader.communication.telegram_utils import send_telegram_message
 
@@ -149,7 +150,13 @@ def monitor_holdings_and_stops():
                 hard_stop_loss_limit = -5.0
                 if profit <= hard_stop_loss_limit:
                     logger.warning(f"🚨 [개별 손절] {name} 절대 손절선 도달! (수익률: {profit:.2f}%) 즉시 전량 청산 주문을 집행합니다.")
-                    trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Hard Stop Loss 작동 (수익률: {profit:.2f}%)")
+                    sell_feat = {
+                        "exit_reason": "hard_stop",
+                        "profit_rate": profit,
+                        "max_profit_rate": stored_max,
+                        "hard_stop_limit": hard_stop_loss_limit
+                    }
+                    trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Hard Stop Loss 작동 (수익률: {profit:.2f}%)", json.dumps(sell_feat, ensure_ascii=False))
                     continue
                 
                 # 3. Trailing Stop (Chandelier Exit) 판정
@@ -160,12 +167,19 @@ def monitor_holdings_and_stops():
                     
                     if (new_max - profit) >= stop_threshold:
                         logger.warning(f"🎯 [트레일링스탑] {name} Chandelier Exit 작동! (고점: {new_max:.2f}%, 현재: {profit:.2f}%, 하락폭: {new_max-profit:.2f}%, 기준: {stop_threshold:.2f}%) 즉시 전량 청산합니다.")
-                        trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Trailing Stop 작동 (고점: {new_max:.2f}%, 현재: {profit:.2f}%, 하락폭: {new_max-profit:.2f}%p)")
+                        sell_feat = {
+                            "exit_reason": "trailing_stop",
+                            "profit_rate": profit,
+                            "max_profit_rate": new_max,
+                            "stop_threshold": stop_threshold,
+                            "atr_pct": atr_pct
+                        }
+                        trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Trailing Stop 작동 (고점: {new_max:.2f}%, 현재: {profit:.2f}%, 하락폭: {new_max-profit:.2f}%p)", json.dumps(sell_feat, ensure_ascii=False))
                         
         except Exception as e:
             logger.error(f"❌ 보유 종목 실시간 감시 루프 에러: {e}")
-
-def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int, reason: str):
+ 
+def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int, reason: str, features: str = None):
     """실시간 청산 매도 주문 전송 및 알림"""
     try:
         logger.info(f"🛒 [{broker_id}] 실시간 매도 주문 실행: {name} - {qty}주")
@@ -183,8 +197,8 @@ def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int,
                 # portfolio_status 수량 0으로 업데이트
                 conn.execute("UPDATE portfolio_status SET rmnd_qty = 0, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?", (broker_id, ticker))
                 # history 기록
-                conn.execute("INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                             (ticker, name, "SELL", qty, 0, 0, f"[실시간감시] {reason}"))
+                conn.execute("INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             (ticker, name, "SELL", qty, 0, 0, f"[실시간감시] {reason}", features))
                 conn.commit()
                 
             # 텔레그램 알림
@@ -258,7 +272,7 @@ def run_trade():
                 with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id FROM trade_signals WHERE status = 'PENDING'")
+                    cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id, features FROM trade_signals WHERE status = 'PENDING'")
                     signals = cursor.fetchall()
                 
                 if signals:
@@ -362,8 +376,8 @@ def run_trade():
                             try:
                                 with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
                                     conn.execute("UPDATE trade_signals SET status = 'DONE' WHERE id = ?", (sig['id'],))
-                                    conn.execute("INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                                 (sig['ticker'], sig['name'], sig['action'], qty, 0, 0, sig['reason']))
+                                    conn.execute("INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                                 (sig['ticker'], sig['name'], sig['action'], qty, 0, 0, sig['reason'], sig['features']))
                                     conn.commit()
                                 logger.info(f"✅ DB 기록 완료: {sig['name']}")
                                 

@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import random
+import json
 import pandas as pd
 import logging
 from logging.handlers import RotatingFileHandler
@@ -717,7 +718,42 @@ class StrategyEngine:
 
             holdings.extend(b_holdings)
         return holdings
-# Ensure broker_id is attached to every sell signal for multi-broker support
+    def _build_feature_dict(self, s: Dict, additional: Dict = None) -> Dict:
+        """종목 데이터와 시장 상태를 취합하여 ML 학습용 피처 사전 구축"""
+        if not s:
+            s = {}
+        feat = {
+            "market_regime": getattr(self, "current_regime", "UNKNOWN"),
+            "kospi_return_90d": getattr(self, "kospi_return_90d", 0.0),
+            "technical": {
+                "price": s.get("price", 0.0),
+                "rsi_14": s.get("rsi", 50.0),
+                "lower_band": s.get("lower_band", 0.0),
+                "upper_band": s.get("upper_band", 0.0),
+                "atr_pct": s.get("atr_pct", 3.0),
+                "is_aligned": s.get("is_aligned", False),
+                "is_under_ma120": s.get("is_under_ma120", False),
+                "is_vcp": s.get("is_vcp", False),
+                "momentum_5d": s.get("return_5d", 0.0),
+                "relative_momentum": s.get("relative_momentum", 0.0)
+            },
+            "fundamental": {
+                "eps_growth": s.get("eps_growth", 0.0),
+                "net_buying": s.get("net_buying", 0.0),
+                "dart_revenue_growth": s.get("dart_revenue_growth", 0.0),
+                "dart_op_growth": s.get("dart_op_growth", 0.0),
+                "dart_debt_ratio": s.get("dart_debt_ratio", 100.0),
+                "dart_cf_quality": s.get("dart_cf_quality", 50.0),
+                "dart_dividend_yield": s.get("dart_dividend_yield", 0.0),
+                "dart_major_shareholder_bonus": s.get("dart_major_shareholder_bonus", 0.0)
+            },
+            "score": s.get("total_score", 0.0)
+        }
+        if additional:
+            feat.update(additional)
+        return feat
+
+    # Ensure broker_id is attached to every sell signal for multi-broker support
     def generate_management_signals(self, current_holdings: List[Dict], top_tickers: List[str], market_data: List[Dict] = None):
         """Trailing Stop 및 절대 손절선(Hard Stop Loss) 기반 매도 시그널 생성 + RSI/BB 오버슈팅 매도 (Phase 1)"""
         sell_signals = []
@@ -741,13 +777,22 @@ class StrategyEngine:
         if total_purchase_amt > 0 and total_portfolio_profit_rate <= self.HARD_STOP_LOSS:
             logger.critical(f"🚨 [글로벌 리스크] 계좌 전체 손실 한도 도달! (전체 수익률: {total_portfolio_profit_rate:.2f}%). 전량 청산(Hard Stop)을 단행합니다.")
             for stock in current_holdings:
+                ticker = stock["ticker"]
+                s_data = market_map.get(ticker, {})
+                feat = self._build_feature_dict(s_data, {
+                    "exit_reason": "global_hard_stop",
+                    "profit_rate": stock.get("profit_rate", 0.0),
+                    "max_profit_rate": stock.get("max_profit_rate", 0.0),
+                    "portfolio_profit_rate": total_portfolio_profit_rate
+                })
                 sell_signals.append({
                     "broker_id": stock.get("broker_id", "KIWOOM"),
                     "ticker": stock["ticker"],
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": stock["quantity"],
-                    "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%, 기준: {self.HARD_STOP_LOSS}%)"
+                    "reason": f"계좌 전체 Hard Stop Loss 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%, 기준: {self.HARD_STOP_LOSS}%)",
+                    "features": json.dumps(feat, ensure_ascii=False)
                 })
             try:
                 if self.publisher:
@@ -777,43 +822,71 @@ class StrategyEngine:
             dynamic_trailing_stop = max(2.0, min(5.0, 1.5 * atr_pct))
             
             if profit <= dynamic_hard_stop:
+                feat = self._build_feature_dict(s_data, {
+                    "exit_reason": "hard_stop",
+                    "profit_rate": profit,
+                    "max_profit_rate": max_profit,
+                    "dynamic_hard_stop": dynamic_hard_stop
+                })
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%, 기준: {dynamic_hard_stop:.2f}%)"
+                    "reason": f"개별 종목 Hard Stop Loss (수익률: {profit:.2f}%, 기준: {dynamic_hard_stop:.2f}%)",
+                    "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.warning(f"⚠️ [{b_id}][개별 손절] {stock['name']} 절대 손절선 도달로 전량 청산 (수익률: {profit:.2f}%, ATR 기준: {dynamic_hard_stop:.2f}%)")
             elif max_profit >= 2.0 and (max_profit - profit) >= dynamic_trailing_stop:
+                feat = self._build_feature_dict(s_data, {
+                    "exit_reason": "trailing_stop",
+                    "profit_rate": profit,
+                    "max_profit_rate": max_profit,
+                    "dynamic_trailing_stop": dynamic_trailing_stop
+                })
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {dynamic_trailing_stop:.2f}%p)"
+                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {dynamic_trailing_stop:.2f}%p)",
+                    "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
             elif rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band:
+                feat = self._build_feature_dict(s_data, {
+                    "exit_reason": "overshooting",
+                    "profit_rate": profit,
+                    "max_profit_rate": max_profit,
+                    "rsi": rsi_val,
+                    "upper_band": upper_band
+                })
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"오버슈팅 청산 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)"
+                    "reason": f"오버슈팅 청산 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)",
+                    "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.info(f"📈 [{b_id}][오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
             elif ticker not in top_tickers and profit < 2.0:
+                feat = self._build_feature_dict(s_data, {
+                    "exit_reason": "replacement",
+                    "profit_rate": profit,
+                    "max_profit_rate": max_profit
+                })
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
                     "quantity": quantity,
-                    "reason": f"전략 제외 및 저효율 종목 교체 (수익률: {profit:.2f}%)"
+                    "reason": f"전략 제외 및 저효율 종목 교체 (수익률: {profit:.2f}%)",
+                    "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.info(f"🔄 [{b_id}][교체 매도] {stock['name']} 순위 제외 및 저효율 교체 매도 (수익률: {profit:.2f}%)")
                 
@@ -827,6 +900,7 @@ class StrategyEngine:
                 
             for s in sell_signals:
                 b_id = s.get("broker_id", "KIWOOM")
+                features_str = s.get("features")
                 if self.repo:
                     self.repo.save_trade_signal(
                         ticker=s["ticker"],
@@ -835,7 +909,8 @@ class StrategyEngine:
                         quantity=s["quantity"],
                         reason=s["reason"],
                         status="PENDING",
-                        broker_id=b_id
+                        broker_id=b_id,
+                        features=features_str
                     )
                 if self.publisher:
                     self.publisher.send_message_sync("TRADE_SIGNAL", {
@@ -848,6 +923,7 @@ class StrategyEngine:
                     })
             for b in buy_signals:
                 b_id = b.get("broker_id", "KIWOOM")
+                features_str = b.get("features")
                 if self.repo:
                     self.repo.save_trade_signal(
                         ticker=b["ticker"],
@@ -856,7 +932,8 @@ class StrategyEngine:
                         quantity=b["quantity"],
                         reason=b["reason"],
                         status="PENDING",
-                        broker_id=b_id
+                        broker_id=b_id,
+                        features=features_str
                     )
                 if self.publisher:
                     self.publisher.send_message_sync("TRADE_SIGNAL", {
@@ -999,7 +1076,8 @@ class StrategyEngine:
                             "name": name,
                             "action": "BUY",
                             "quantity": quantity,
-                            "reason": f"기술적 타점 부합 (RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원) | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}"
+                            "reason": f"기술적 타점 부합 (RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원) | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}",
+                            "features": json.dumps(self._build_feature_dict(s), ensure_ascii=False)
                         })
                         logger.info(f"📋 [{b_name}] 매수 신호 생성: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 비중조정: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
                     else:
