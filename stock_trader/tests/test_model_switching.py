@@ -3,10 +3,15 @@ import sys
 import unittest
 from unittest.mock import patch
 
-sys.path.append("/root/workspace/gemini-quant")
+# 현재 파일의 상위 상위 디렉토리를 sys.path에 추가 (플랫폼 독립적)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from stock_trader.ai.agent_skills import switch_ai_model, AVAILABLE_MODELS
 
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
+BASE_DIR = os.path.abspath(os.path.join(project_root, "stock_trader"))
 
 class TestModelSwitching(unittest.TestCase):
     def test_show_list(self):

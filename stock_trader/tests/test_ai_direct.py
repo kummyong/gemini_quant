@@ -8,6 +8,9 @@ load_dotenv("workspace_py/stock_trader/.env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def test_ai():
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY is not set. Skipping test.")
+        return
     print(f"Testing Gemini API with Key: {GEMINI_API_KEY[:10]}...")
     # v1 엔드포인트 + gemini-pro (가장 범용적인 조합)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key={GEMINI_API_KEY}"

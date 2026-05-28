@@ -4,7 +4,9 @@ import json
 import sys
 from dotenv import load_dotenv
 
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+BASE_DIR = os.path.join(project_root, "stock_trader")
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 

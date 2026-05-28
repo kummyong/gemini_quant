@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import random
+import pandas as pd
 import logging
 from logging.handlers import RotatingFileHandler
 import datetime
@@ -157,14 +158,45 @@ class StrategyEngine:
         self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
 
+    def _calculate_adx(self, df, period=14):
+        try:
+            df = df.copy()
+            df['UpMove'] = df['High'] - df['High'].shift(1)
+            df['DownMove'] = df['Low'].shift(1) - df['Low']
+            
+            df['+DM'] = 0.0
+            df.loc[(df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), '+DM'] = df['UpMove']
+            
+            df['-DM'] = 0.0
+            df.loc[(df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), '-DM'] = df['DownMove']
+            
+            df['H-L'] = df['High'] - df['Low']
+            df['H-Cp'] = (df['High'] - df['Close'].shift(1)).abs()
+            df['L-Cp'] = (df['Low'] - df['Close'].shift(1)).abs()
+            df['TR'] = df[['H-L', 'H-Cp', 'L-Cp']].max(axis=1)
+            
+            df['TR_smooth'] = df['TR'].rolling(window=period).mean()
+            df['+DM_smooth'] = df['+DM'].rolling(window=period).mean()
+            df['-DM_smooth'] = df['-DM'].rolling(window=period).mean()
+            
+            df['+DI'] = 100 * (df['+DM_smooth'] / (df['TR_smooth'] + 1e-9))
+            df['-DI'] = 100 * (df['-DM_smooth'] / (df['TR_smooth'] + 1e-9))
+            df['DX'] = 100 * ((df['+DI'] - df['-DI']).abs() / (df['+DI'] + df['-DI'] + 1e-9))
+            df['ADX'] = df['DX'].rolling(window=period).mean()
+            return float(df['ADX'].iloc[-1]) if not df['ADX'].empty and not pd.isna(df['ADX'].iloc[-1]) else 25.0
+        except Exception as e:
+            logger.warning(f"ADX 계산 실패 (기본값 25.0 적용): {e}")
+            return 25.0
+
     def _determine_market_regime(self):
-        """KOSPI 50일 이동평균선을 기준으로 BULL/BEAR 국면을 판독하고 해당 국면에 맞는 파라미터를 설정합니다."""
+        """KOSPI 50일 이동평균선 및 ADX 지표를 기준으로 BULL/BEAR/SIDEWAY 국면을 판독하고 파라미터를 설정합니다."""
         logger.info("📈 실시간 KOSPI(KS11) 국면 판독 시작...")
+        self.kospi_return_90d = 0.0
         try:
             import FinanceDataReader as fdr
             import datetime
-            # 최근 90일치 코스피 데이터 로드
-            start_date = (datetime.datetime.now() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
+            # 최근 180일치 코스피 데이터 로드
+            start_date = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime('%Y-%m-%d')
             kospi = fdr.DataReader("KS11", start=start_date)
             
             if not kospi.empty and len(kospi) >= 50:
@@ -172,16 +204,32 @@ class StrategyEngine:
                 latest_close = float(kospi["Close"].iloc[-1])
                 latest_ma = float(kospi["50_MA"].iloc[-1])
                 
-                if latest_close > latest_ma:
-                    self.current_regime = "BULL"
-                    self.RSI_BUY_THRES = self.BULL_RSI
-                    self.BB_STD = self.BULL_BB
+                # ADX 계산
+                adx_val = self._calculate_adx(kospi)
+                logger.info(f"📊 KOSPI ADX(14): {adx_val:.2f}")
+                
+                # 90일(영업일 기준 약 60일) 수익률 계산
+                if len(kospi) >= 60:
+                    self.kospi_return_90d = ((latest_close - float(kospi["Close"].iloc[-60])) / float(kospi["Close"].iloc[-60])) * 100
                 else:
-                    self.current_regime = "BEAR"
-                    self.RSI_BUY_THRES = self.BEAR_RSI
-                    self.BB_STD = self.BEAR_BB
+                    self.kospi_return_90d = 0.0
+                
+                # ADX < 20 이면 횡보장(SIDEWAY)으로 판단
+                if adx_val < 20.0:
+                    self.current_regime = "SIDEWAY"
+                    self.RSI_BUY_THRES = 35.0  # 횡보장에서는 완화된 매수선
+                    self.BB_STD = 1.8         # 볼밴 하단 배수 축소
+                else:
+                    if latest_close > latest_ma:
+                        self.current_regime = "BULL"
+                        self.RSI_BUY_THRES = self.BULL_RSI
+                        self.BB_STD = self.BULL_BB
+                    else:
+                        self.current_regime = "BEAR"
+                        self.RSI_BUY_THRES = self.BEAR_RSI
+                        self.BB_STD = self.BEAR_BB
                     
-                logger.info(f"⚖️ [현재 시장 국면] {self.current_regime} (코스피: {latest_close:,.2f} / 50일선: {latest_ma:,.2f})")
+                logger.info(f"⚖️ [현재 시장 국면] {self.current_regime} (코스피: {latest_close:,.2f} / 50일선: {latest_ma:,.2f}, 90일 수익률: {self.kospi_return_90d:+.2f}%)")
                 logger.info(f"👉 [적용 파라미터] RSI 매수선: {self.RSI_BUY_THRES}, BB 하단배수: {self.BB_STD}")
             else:
                 raise ValueError("코스피 데이터가 부족합니다.")
@@ -190,6 +238,7 @@ class StrategyEngine:
             self.current_regime = "BEAR (Fallback)"
             self.RSI_BUY_THRES = self.BEAR_RSI
             self.BB_STD = self.BEAR_BB
+            self.kospi_return_90d = 0.0
 
     def check_market_circuit_breaker(self) -> bool:
         """
@@ -388,20 +437,58 @@ class StrategyEngine:
             rsi_val = 50.0
             lower_band = 0.0
             upper_band = 0.0
+            is_bottoming = True
+            relative_momentum = 0.0
+            atr_pct = 3.0
             try:
                 import FinanceDataReader as fdr
-                df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
+                # 90일 수익률 및 50일 MA, 14일 ATR 계산을 위해 150일 데이터 다운로드
+                df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=150)).strftime('%Y-%m-%d'))
                 if not df_hist.empty and len(df_hist) >= 20:
                     closes = df_hist['Close']
+                    
+                    # 1. RSI 계산
                     delta = closes.diff()
                     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
                     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
                     rs = gain / (loss + 1e-9)
-                    rsi_val = float((100 - (100 / (1 + rs))).iloc[-1])
+                    rsi_series = 100 - (100 / (1 + rs))
+                    rsi_val = float(rsi_series.iloc[-1])
+                    rsi_val_prev = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else rsi_val
+                    
+                    # 2. 볼린저 밴드
                     ma20 = closes.rolling(window=20).mean()
                     std20 = closes.rolling(window=20).std()
                     lower_band = float((ma20 - self.BB_STD * std20).iloc[-1])
                     upper_band = float((ma20 + self.BB_STD * std20).iloc[-1])
+                    
+                    # 3. MACD 필터 (떨어지는 칼날 방지)
+                    ema12 = closes.ewm(span=12, adjust=False).mean()
+                    ema26 = closes.ewm(span=26, adjust=False).mean()
+                    macd = ema12 - ema26
+                    signal = macd.ewm(span=9, adjust=False).mean()
+                    macd_hist = macd - signal
+                    
+                    # 최근 2거래일간 MACD 히스토그램이 반등하고 있거나 MACD가 Signal 선을 넘어선 경우 bottoming으로 인정
+                    if len(macd_hist) >= 2:
+                        is_bottoming = (macd_hist.iloc[-1] > macd_hist.iloc[-2]) or (macd.iloc[-1] > signal.iloc[-1])
+                    else:
+                        is_bottoming = True
+                        
+                    # 4. 상대 모멘텀 계산 (90일 수익률 비교)
+                    if len(closes) >= 60:
+                        stock_return_90d = ((closes.iloc[-1] - float(closes.iloc[-60])) / float(closes.iloc[-60])) * 100
+                        relative_momentum = stock_return_90d - getattr(self, 'kospi_return_90d', 0.0)
+                    else:
+                        relative_momentum = 0.0
+                        
+                    # 5. ATR 변동성 계산 (14일 기준)
+                    highs = df_hist['High']
+                    lows = df_hist['Low']
+                    tr = pd.concat([highs - lows, (highs - closes.shift(1)).abs(), (lows - closes.shift(1)).abs()], axis=1).max(axis=1)
+                    atr_val = tr.rolling(window=14).mean().iloc[-1]
+                    atr_pct = (atr_val / closes.iloc[-1]) * 100 if closes.iloc[-1] > 0 else 3.0
+                    
             except Exception as tech_e:
                 logger.warning(f"[{name}] 기술 지표 계산 실패: {tech_e}")
 
@@ -421,7 +508,10 @@ class StrategyEngine:
                 "dart_available": dart_available,
                 "rsi": rsi_val,
                 "lower_band": lower_band,
-                "upper_band": upper_band
+                "upper_band": upper_band,
+                "is_bottoming": is_bottoming,
+                "relative_momentum": relative_momentum,
+                "atr_pct": atr_pct
             })
             time.sleep(0.5)
             
@@ -468,6 +558,11 @@ class StrategyEngine:
                 final_score += min(8.0, div_yield * 2.0)
             if stock.get("dart_debt_ratio", 100.0) > 200:
                 final_score -= 10.0
+                
+            # 상대 모멘텀(Relative Strength) 보너스 반영 (최대 10점)
+            rel_mom = stock.get("relative_momentum", 0.0)
+            if rel_mom > 0:
+                final_score += min(10.0, rel_mom * 0.1)
             
             stock["total_score"] = round(final_score, 2)
         
@@ -791,16 +886,22 @@ class StrategyEngine:
                 lower_band = s.get("lower_band", 0.0)
                 price = s["price"]
                 score = s["total_score"]
+                atr_pct = s.get("atr_pct", 3.0)
                 
                 is_rsi_match = rsi_val <= self.RSI_BUY_THRES
                 is_bb_match = (lower_band > 0) and (price <= lower_band)
                 
                 if is_rsi_match and is_bb_match:
+                    if not s.get("is_bottoming", True):
+                        logger.info(f"⏭️ [{b_name}] {name}: RSI/BB 조건 부합하나 하락세 미멈춤 (MACD/RSI 반등 미확인)으로 매수 스킵")
+                        continue
+                        
                     if price > 0 and remaining_cash > 0:
                         # 차등 가중치: (내 점수 / 전체 점수) * (평균목표비중 * 종목수)
-                        # 예: 점수가 가장 높으면 10%보다 많은 비중, 낮으면 적은 비중
+                        # 변동성 균등(Volatility Parity) 모델 적용: 종목의 변동성이 작을수록 비중 확대, 클수록 축소
                         score_ratio = (score / total_score_sum) * len(top_5)
-                        adjusted_weight = self.TARGET_WEIGHT * score_ratio
+                        size_factor = max(0.5, min(1.5, 3.0 / atr_pct))
+                        adjusted_weight = self.TARGET_WEIGHT * score_ratio * size_factor
                         
                         target_amt = min(
                             broker_equity * adjusted_weight,
@@ -830,9 +931,9 @@ class StrategyEngine:
                             "name": name,
                             "action": "BUY",
                             "quantity": quantity,
-                            "reason": f"기술적 타점 부합 (RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원) [스코어 차등적용]"
+                            "reason": f"기술적 타점 부합 (RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원) | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}"
                         })
-                        logger.info(f"📋 [{b_name}] 매수 신호 생성: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (잔여: {remaining_cash:,.0f}원)")
+                        logger.info(f"📋 [{b_name}] 매수 신호 생성: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 비중조정: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
                     else:
                         if remaining_cash <= 0:
                             logger.info(f"⏭️ [{b_name}] {name}: 예수금 소진으로 매수 스킵")

@@ -4,8 +4,10 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 
 # 경로 설정 및 도구 임포트
-PROJECT_ROOT = "/root/workspace/gemini-quant"
-sys.path.append(PROJECT_ROOT)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(current_dir, "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 from stock_trader.ai.agent_skills import get_account_status, execute_market_order, update_profit_cut
 
 load_dotenv(os.path.join(PROJECT_ROOT, "stock_trader", ".env"))

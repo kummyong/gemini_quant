@@ -1,8 +1,13 @@
 import os, sys, json
 from datetime import datetime
 # 경로 설정
-BASE_DIR = "/root/workspace/gemini-quant/stock_trader"
-sys.path.append(BASE_DIR)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+BASE_DIR = os.path.join(project_root, "stock_trader")
+if project_root not in sys.path:
+    sys.path.append(project_root)
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 
 try:
     from communication.telegram_listener import get_intent_robust, SYSTEM_TOOLS
