@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 from datetime import datetime, timedelta
+import pytz
 from stock_trader.communication.telegram_utils import send_telegram_photo
 from stock_trader.config import DB_PATH, LOG_DIR
 
@@ -12,7 +13,8 @@ def generate_trend_report(range_type="1h"):
         return None, None, "데이터베이스 파일이 존재하지 않습니다."
 
     try:
-        now = datetime.now()
+        KST = pytz.timezone('Asia/Seoul')
+        now = datetime.now(KST)
         labels = {"1h": "1시간", "24h": "1일(24시간)", "7d": "1주일", "30d": "1개월"}
         label = labels.get(range_type, range_type)
 
