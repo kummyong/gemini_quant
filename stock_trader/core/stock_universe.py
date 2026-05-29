@@ -5,6 +5,9 @@ gemini_quant 통합 종목 매핑 사전
 local_intent_router.py, strategy_engine.py 등에서 import하여 사용합니다.
 """
 
+import os
+import json
+
 # 종목명(한글/영문) → 6자리 종목코드 매핑
 STOCK_MAP = {
     # 대형주
@@ -31,7 +34,12 @@ STOCK_MAP = {
     "에코프로": "086520", "에코프로비엠": "247540",
     # 반도체/IT
     "한미반도체": "042700",
+    "리노공업": "058470",
     "엔비디아": "NVDA",
+    # 금융/제조 대형주
+    "현대모비스": "012330",
+    "LG전자": "066570",
+    "삼성물산": "028260",
     # 항공
     "진에어": "272450", "대한항공": "003490", "아시아나": "020560",
 }
@@ -45,4 +53,26 @@ SAMPLE_TICKERS = [
     ("015760", "한국전력"), ("033780", "KT&G"), ("003550", "LG"),
     ("000100", "유한양행"), ("000700", "유수홀딩스"), ("017940", "E1"),
     ("277810", "레인보우로보틱스"), ("465770", "STX그린로지스"),
+    
+    # 추가된 종목군
+    ("373220", "LG에너지솔루션"), ("207940", "삼성바이오로직스"), ("086520", "에코프로"),
+    ("247540", "에코프로비엠"), ("042700", "한미반도체"), ("058470", "리노공업"),
+    ("055550", "신한지주"), ("012330", "현대모비스"), ("066570", "LG전자"),
+    ("028260", "삼성물산"),
 ]
+
+# 로컬 JSON에서 동적으로 추가된 유니버스 로드 및 병합
+try:
+    STOCK_TRADER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    JSON_PATH = os.path.join(STOCK_TRADER_DIR, "logs", "active_universe.json")
+    if os.path.exists(JSON_PATH):
+        with open(JSON_PATH, "r", encoding="utf-8") as f:
+            dynamic_data = json.load(f)
+            for item in dynamic_data.get("tickers", []):
+                ticker = item["ticker"]
+                name = item["name"]
+                if ticker not in [t[0] for t in SAMPLE_TICKERS]:
+                    SAMPLE_TICKERS.append((ticker, name))
+                    STOCK_MAP[name] = ticker
+except Exception:
+    pass

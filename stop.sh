@@ -2,6 +2,7 @@
 echo "🛑 Gemini Quant 서비스를 종료합니다..."
 
 # 워치독 먼저 종료 (재실행 방지)
+pkill -f run_watchdog.sh
 pkill -f unified_watchdog.py
 
 # 하위 프로세스들 정리
