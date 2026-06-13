@@ -4,7 +4,9 @@ import json
 import pandas as pd
 
 # 프로젝트 루트를 path에 추가
-sys.path.append("/root/workspace/gemini-quant")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+sys.path.append(project_root)
 
 from stock_trader.data.db_repository import DbRepository
 from stock_trader.core.strategy_engine import StrategyEngine
@@ -64,7 +66,7 @@ def main():
             matched_rsi += 1
         if is_bb_match:
             matched_bb += 1
-        if is_rsi_match and is_bb_match:
+        if is_rsi_match or is_bb_match:
             matched_both += 1
             if is_bottoming:
                 matched_all += 1
@@ -72,8 +74,8 @@ def main():
     print(f"- 전체 종목 수: {len(scored_stocks)}개")
     print(f"- RSI 조건({engine.RSI_BUY_THRES} 이하) 만족: {matched_rsi}개")
     print(f"- BB 조건(하단배수 {engine.BB_STD}) 만족: {matched_bb}개")
-    print(f"- RSI & BB 동시 만족: {matched_both}개")
-    print(f"- RSI & BB & 하락세 멈춤(최종 매수 대상) 만족: {matched_all}개")
+    print(f"- RSI 또는 BB 중 하나 이상 만족: {matched_both}개")
+    print(f"- 진입 조건(RSI/BB) & 하락세 멈춤(최종 매수 대상) 만족: {matched_all}개")
     print("=" * 60)
 
 if __name__ == "__main__":

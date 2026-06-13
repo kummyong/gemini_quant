@@ -1060,57 +1060,85 @@ class StrategyEngine:
                 
                 is_rsi_match = rsi_val <= self.RSI_BUY_THRES
                 is_bb_match = (lower_band > 0) and (price <= lower_band)
-                
-                # 엄격한 타점 유지 (RSI AND BB 동시 부합)
-                if is_rsi_match and is_bb_match:
+
+                # [전략 A] 역추세: RSI 과매도 + BB 하단 동시 충족
+                is_mean_reversion = is_rsi_match and is_bb_match
+
+                # [전략 B] 추세추종: BULL 국면 + MA 정배열 + RSI 건강구간 + 코스피 대비 상대강도 우위
+                # RSI 45~65: 추세 중이나 과매수 아닌 구간 (이전 RSI 90 추격매수 재발 방지)
+                is_trend_following = (
+                    getattr(self, 'current_regime', '') == "BULL" and
+                    s.get("is_aligned", False) and
+                    45.0 <= rsi_val <= 65.0 and
+                    s.get("relative_momentum", 0.0) > 5.0 and
+                    s.get("is_bottoming", True)
+                )
+
+                if is_mean_reversion:
+                    signal_type = "역추세"
+                    weight_multiplier = 1.0
                     if not s.get("is_bottoming", True):
-                        logger.info(f"⏭️ [{b_name}] {name}: RSI/BB 조건 부합하나 하락세 미멈춤 (MACD/RSI 반등 미확인)으로 매수 스킵")
+                        logger.info(f"⏭️ [{b_name}] {name}: RSI/BB 조건 부합하나 하락세 미멈춤으로 매수 스킵")
                         continue
-                        
-                    if price > 0 and remaining_cash > 0:
-                        # 차등 가중치: (내 점수 / 전체 점수) * (평균목표비중 * 종목수)
-                        # 변동성 균등(Volatility Parity) 모델 적용: 종목의 변동성이 작을수록 비중 확대, 클수록 축소
-                        score_ratio = (score / total_score_sum) * len(top_5)
-                        size_factor = max(0.5, min(1.5, 3.0 / atr_pct))
-                        adjusted_weight = self.TARGET_WEIGHT * score_ratio * size_factor
-                        
-                        target_amt = min(
-                            broker_equity * adjusted_weight,
-                            self.BROKER_CASH.get(b_name, 0.0) * self.MAX_SINGLE_ORDER_RATIO,
-                            remaining_cash
-                        )
-                        quantity = int(target_amt / price)
-                        
-                        if quantity <= 0:
-                            logger.info(f"⏭️ [{b_name}] {name}: 예수금 대비 단가가 높아 매수 스킵 (단가: {price:,.0f}원, 가용금: {target_amt:,.0f}원)")
-                            continue
-                        
+                elif is_trend_following:
+                    signal_type = "추세추종"
+                    weight_multiplier = 0.7  # 추세추종은 포지션 70%로 제한 (추격매수 과대 진입 방지)
+                    logger.info(f"📈 [{b_name}] {name}: 추세추종 진입 조건 부합 (RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}%)")
+                else:
+                    logger.info(
+                        f"⏭️ [{b_name}] {name}: 매수 조건 미충족 "
+                        f"(RSI: {rsi_val:.1f} | 역추세기준≤{self.RSI_BUY_THRES} | "
+                        f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}%)"
+                    )
+                    continue
+
+                if price > 0 and remaining_cash > 0:
+                    score_ratio = (score / total_score_sum) * len(top_5)
+                    size_factor = max(0.5, min(1.5, 3.0 / atr_pct)) * weight_multiplier
+                    adjusted_weight = self.TARGET_WEIGHT * score_ratio * size_factor
+
+                    target_amt = min(
+                        broker_equity * adjusted_weight,
+                        self.BROKER_CASH.get(b_name, 0.0) * self.MAX_SINGLE_ORDER_RATIO,
+                        remaining_cash
+                    )
+                    quantity = int(target_amt / price)
+
+                    if quantity <= 0:
+                        logger.info(f"⏭️ [{b_name}] {name}: 예수금 대비 단가가 높아 매수 스킵 (단가: {price:,.0f}원, 가용금: {target_amt:,.0f}원)")
+                        continue
+
+                    order_cost = quantity * price
+                    if order_cost > remaining_cash:
+                        quantity = int(remaining_cash / price)
                         order_cost = quantity * price
-                        if order_cost > remaining_cash:
-                            quantity = int(remaining_cash / price)
-                            order_cost = quantity * price
-                        
-                        if quantity <= 0:
-                            logger.info(f"⏭️ [{b_name}] {name}: 잔여 예수금 부족으로 매수 스킵")
-                            continue
-                        
-                        remaining_cash -= order_cost  # 증권사 예수금 차감
-                        
-                        buy_signals.append({
-                            "broker_id": b_name,
-                            "ticker": ticker,
-                            "name": name,
-                            "action": "BUY",
-                            "quantity": quantity,
-                            "reason": f"기술적 타점 부합 (RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원) | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}",
-                            "features": json.dumps(self._build_feature_dict(s), ensure_ascii=False)
-                        })
-                        logger.info(f"📋 [{b_name}] 매수 신호 생성: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 비중조정: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
+
+                    if quantity <= 0:
+                        logger.info(f"⏭️ [{b_name}] {name}: 잔여 예수금 부족으로 매수 스킵")
+                        continue
+
+                    remaining_cash -= order_cost
+
+                    if signal_type == "역추세":
+                        reason = f"[역추세] RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원 | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}"
                     else:
-                        if remaining_cash <= 0:
-                            logger.info(f"⏭️ [{b_name}] {name}: 예수금 소진으로 매수 스킵")
-                        else:
-                            logger.info(f"⏭️ [{b_name}] {name}: 가격 정보 없음으로 매수 스킵")
+                        reason = f"[추세추종] RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{price:.2f}"
+
+                    buy_signals.append({
+                        "broker_id": b_name,
+                        "ticker": ticker,
+                        "name": name,
+                        "action": "BUY",
+                        "quantity": quantity,
+                        "reason": reason,
+                        "features": json.dumps(self._build_feature_dict(s), ensure_ascii=False)
+                    })
+                    logger.info(f"📋 [{b_name}] [{signal_type}] 매수 신호: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 비중: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
+                else:
+                    if remaining_cash <= 0:
+                        logger.info(f"⏭️ [{b_name}] {name}: 예수금 소진으로 매수 스킵")
+                    else:
+                        logger.info(f"⏭️ [{b_name}] {name}: 가격 정보 없음으로 매수 스킵")
 
         self.update_signals(buy_signals, sell_signals)
         self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
