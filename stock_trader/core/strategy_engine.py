@@ -128,9 +128,9 @@ class StrategyEngine:
     def _load_hyperparams(self):
         """DB에서 최신 하이퍼파라미터를 로드하여 매매 기준으로 사용합니다"""
         params = {
-            "BULL_RSI": 30.0,
+            "BULL_RSI": 30.0,             # 엄격한 타점(30) 원복
             "BULL_BB": 2.0,
-            "BEAR_RSI": 25.0,
+            "BEAR_RSI": 25.0,             # 엄격한 타점(25) 원복
             "BEAR_BB": 2.2,
             "RSI_SELL_THRES": 70.0,
             "TRAILING_STOP_DROP": 3.0,
@@ -218,7 +218,7 @@ class StrategyEngine:
                 # ADX < 20 이면 횡보장(SIDEWAY)으로 판단
                 if adx_val < 20.0:
                     self.current_regime = "SIDEWAY"
-                    self.RSI_BUY_THRES = 35.0  # 횡보장에서는 완화된 매수선
+                    self.RSI_BUY_THRES = 35.0  # 횡보장 기준선(35) 원복
                     self.BB_STD = 1.8         # 볼밴 하단 배수 축소
                 else:
                     if latest_close > latest_ma:
@@ -321,11 +321,36 @@ class StrategyEngine:
             time.sleep(0.1) # Termux 리소스 방어용 짧은 대기
 
         real_stocks = []
-        for ticker, name, df_hist in raw_stocks_data:
+        for i, (ticker, name, df_hist) in enumerate(raw_stocks_data):
+            # API Rate Limit 방어 (20개마다 3초 지연 추가)
+            if i > 0 and i % 20 == 0:
+                logger.info(f"⏳ Rate Limit 방어용 지연 처리: 3초간 대기... ({i}/{len(raw_stocks_data)})")
+                time.sleep(3.0)
+
             eps_growth = 0.0
             industry_name = "기타"
             net_buying = 0.0
             current_price = 0.0
+            
+            # 사전 필터링(Pre-filtering) 적용: 동전주(1000원 미만) 및 거래대금 미달(5억 미만)
+            try:
+                if df_hist.empty or len(df_hist) < 5:
+                    logger.info(f"⏭️ [{name}] 데이터 부족으로 1차 필터 스킵")
+                    continue
+                
+                latest_close = float(df_hist['Close'].iloc[-1])
+                avg_vol_5d = float(df_hist['Volume'].tail(5).mean())
+                avg_value_5d = latest_close * avg_vol_5d
+                
+                if latest_close < 1000:
+                    logger.info(f"⏭️ [{name}] 동전주 필터링 (최신가: {latest_close:,.0f}원 < 1,000원)")
+                    continue
+                    
+                if avg_value_5d < 500_000_000: # 5억 원
+                    logger.info(f"⏭️ [{name}] 거래대금 부족 필터링 (5일 평균: {avg_value_5d/1e8:.1f}억 < 5억)")
+                    continue
+            except Exception as filter_e:
+                logger.warning(f"⚠️ [{name}] 1차 필터링 검사 실패: {filter_e}")
             
             # Naver crawling for fundamental data
             try:
@@ -1036,6 +1061,7 @@ class StrategyEngine:
                 is_rsi_match = rsi_val <= self.RSI_BUY_THRES
                 is_bb_match = (lower_band > 0) and (price <= lower_band)
                 
+                # 엄격한 타점 유지 (RSI AND BB 동시 부합)
                 if is_rsi_match and is_bb_match:
                     if not s.get("is_bottoming", True):
                         logger.info(f"⏭️ [{b_name}] {name}: RSI/BB 조건 부합하나 하락세 미멈춤 (MACD/RSI 반등 미확인)으로 매수 스킵")
