@@ -752,32 +752,40 @@ class StrategyEngine:
         """종목 데이터와 시장 상태를 취합하여 ML 학습용 피처 사전 구축"""
         if not s:
             s = {}
+
+        def to_python_type(val, default):
+            if val is None:
+                return default
+            if hasattr(val, "item"):
+                return val.item()
+            return val
+
         feat = {
             "market_regime": getattr(self, "current_regime", "UNKNOWN"),
-            "kospi_return_90d": getattr(self, "kospi_return_90d", 0.0),
+            "kospi_return_90d": float(to_python_type(getattr(self, "kospi_return_90d", 0.0), 0.0)),
             "technical": {
-                "price": s.get("price", 0.0),
-                "rsi_14": s.get("rsi", 50.0),
-                "lower_band": s.get("lower_band", 0.0),
-                "upper_band": s.get("upper_band", 0.0),
-                "atr_pct": s.get("atr_pct", 3.0),
-                "is_aligned": s.get("is_aligned", False),
-                "is_under_ma120": s.get("is_under_ma120", False),
-                "is_vcp": s.get("is_vcp", False),
-                "momentum_5d": s.get("return_5d", 0.0),
-                "relative_momentum": s.get("relative_momentum", 0.0)
+                "price": float(to_python_type(s.get("price", 0.0), 0.0)),
+                "rsi_14": float(to_python_type(s.get("rsi", 50.0), 50.0)),
+                "lower_band": float(to_python_type(s.get("lower_band", 0.0), 0.0)),
+                "upper_band": float(to_python_type(s.get("upper_band", 0.0), 0.0)),
+                "atr_pct": float(to_python_type(s.get("atr_pct", 3.0), 3.0)),
+                "is_aligned": bool(to_python_type(s.get("is_aligned", False), False)),
+                "is_under_ma120": bool(to_python_type(s.get("is_under_ma120", False), False)),
+                "is_vcp": bool(to_python_type(s.get("is_vcp", False), False)),
+                "momentum_5d": float(to_python_type(s.get("return_5d", 0.0), 0.0)),
+                "relative_momentum": float(to_python_type(s.get("relative_momentum", 0.0), 0.0))
             },
             "fundamental": {
-                "eps_growth": s.get("eps_growth", 0.0),
-                "net_buying": s.get("net_buying", 0.0),
-                "dart_revenue_growth": s.get("dart_revenue_growth", 0.0),
-                "dart_op_growth": s.get("dart_op_growth", 0.0),
-                "dart_debt_ratio": s.get("dart_debt_ratio", 100.0),
-                "dart_cf_quality": s.get("dart_cf_quality", 50.0),
-                "dart_dividend_yield": s.get("dart_dividend_yield", 0.0),
-                "dart_major_shareholder_bonus": s.get("dart_major_shareholder_bonus", 0.0)
+                "eps_growth": float(to_python_type(s.get("eps_growth", 0.0), 0.0)),
+                "net_buying": float(to_python_type(s.get("net_buying", 0.0), 0.0)),
+                "dart_revenue_growth": float(to_python_type(s.get("dart_revenue_growth", 0.0), 0.0)),
+                "dart_op_growth": float(to_python_type(s.get("dart_op_growth", 0.0), 0.0)),
+                "dart_debt_ratio": float(to_python_type(s.get("dart_debt_ratio", 100.0), 100.0)),
+                "dart_cf_quality": float(to_python_type(s.get("dart_cf_quality", 50.0), 50.0)),
+                "dart_dividend_yield": float(to_python_type(s.get("dart_dividend_yield", 0.0), 0.0)),
+                "dart_major_shareholder_bonus": float(to_python_type(s.get("dart_major_shareholder_bonus", 0.0), 0.0))
             },
-            "score": s.get("total_score", 0.0)
+            "score": float(to_python_type(s.get("total_score", 0.0), 0.0))
         }
         if additional:
             feat.update(additional)
