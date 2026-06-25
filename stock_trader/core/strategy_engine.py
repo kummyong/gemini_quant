@@ -215,16 +215,21 @@ class StrategyEngine:
                 else:
                     self.kospi_return_90d = 0.0
                 
-                # ADX < 20 이면 횡보장(SIDEWAY)으로 판단
-                if adx_val < 20.0:
+                # ADX < 20 이면 횡보장(SIDEWAY)으로 판단하되,
+                # 코스피가 50일선 대비 +8% 이상 위에 있으면 추세 상승 중으로 간주해 BULL 적용
+                ma_gap_pct = ((latest_close - latest_ma) / latest_ma) * 100 if latest_ma > 0 else 0.0
+                if adx_val < 20.0 and ma_gap_pct < 8.0:
                     self.current_regime = "SIDEWAY"
-                    self.RSI_BUY_THRES = 35.0  # 횡보장 기준선(35) 원복
-                    self.BB_STD = 1.8         # 볼밴 하단 배수 축소
+                    self.RSI_BUY_THRES = 45.0  # 횡보장: 추세추종 진입을 위해 45까지 허용
+                    self.BB_STD = 1.8
+                    logger.info(f"📊 SIDEWAY 판정 (ADX: {adx_val:.1f}, 50일선 갭: {ma_gap_pct:+.1f}%)")
                 else:
                     if latest_close > latest_ma:
                         self.current_regime = "BULL"
                         self.RSI_BUY_THRES = self.BULL_RSI
                         self.BB_STD = self.BULL_BB
+                        if adx_val < 20.0:
+                            logger.info(f"📊 ADX 낮으나 50일선 갭 {ma_gap_pct:+.1f}% → BULL 적용")
                     else:
                         self.current_regime = "BEAR"
                         self.RSI_BUY_THRES = self.BEAR_RSI
@@ -1061,34 +1066,36 @@ class StrategyEngine:
                 is_rsi_match = rsi_val <= self.RSI_BUY_THRES
                 is_bb_match = (lower_band > 0) and (price <= lower_band)
 
-                # [전략 A] 역추세: RSI 과매도 + BB 하단 동시 충족
-                is_mean_reversion = is_rsi_match and is_bb_match
+                # [전략 A] 역추세: RSI 과매도 OR BB 하단 (둘 중 하나만 충족해도 진입)
+                is_mean_reversion = is_rsi_match or is_bb_match
 
-                # [전략 B] 추세추종: BULL 국면 + MA 정배열 + RSI 건강구간 + 코스피 대비 상대강도 우위
+                # [전략 B] 추세추종: BULL/SIDEWAY 국면 + MA 정배열 + RSI 건강구간 + 코스피 대비 상대강도 우위
                 # RSI 45~65: 추세 중이나 과매수 아닌 구간 (이전 RSI 90 추격매수 재발 방지)
+                regime_now = getattr(self, 'current_regime', '')
                 is_trend_following = (
-                    getattr(self, 'current_regime', '') == "BULL" and
+                    regime_now in ("BULL", "SIDEWAY") and
                     s.get("is_aligned", False) and
                     45.0 <= rsi_val <= 65.0 and
-                    s.get("relative_momentum", 0.0) > 5.0 and
+                    s.get("relative_momentum", 0.0) > 3.0 and
                     s.get("is_bottoming", True)
                 )
 
                 if is_mean_reversion:
                     signal_type = "역추세"
                     weight_multiplier = 1.0
-                    if not s.get("is_bottoming", True):
-                        logger.info(f"⏭️ [{b_name}] {name}: RSI/BB 조건 부합하나 하락세 미멈춤으로 매수 스킵")
+                    if is_rsi_match and not is_bb_match and not s.get("is_bottoming", True):
+                        logger.info(f"⏭️ [{b_name}] {name}: RSI 조건 부합하나 하락세 미멈춤으로 매수 스킵")
                         continue
                 elif is_trend_following:
-                    signal_type = "추세추종"
-                    weight_multiplier = 0.7  # 추세추종은 포지션 70%로 제한 (추격매수 과대 진입 방지)
-                    logger.info(f"📈 [{b_name}] {name}: 추세추종 진입 조건 부합 (RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}%)")
+                    # SIDEWAY 국면은 불확실성 반영해 포지션 50%로 제한, BULL은 70%
+                    weight_multiplier = 0.5 if regime_now == "SIDEWAY" else 0.7
+                    signal_type = f"추세추종({'SIDEWAY' if regime_now == 'SIDEWAY' else 'BULL'})"
+                    logger.info(f"📈 [{b_name}] {name}: 추세추종 진입 조건 부합 (RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}%, 국면: {regime_now})")
                 else:
                     logger.info(
                         f"⏭️ [{b_name}] {name}: 매수 조건 미충족 "
-                        f"(RSI: {rsi_val:.1f} | 역추세기준≤{self.RSI_BUY_THRES} | "
-                        f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}%)"
+                        f"(RSI: {rsi_val:.1f} | 역추세RSI≤{self.RSI_BUY_THRES} | BB하단: {is_bb_match} | "
+                        f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | 국면: {regime_now})"
                     )
                     continue
 
