@@ -1,6 +1,0 @@
-﻿Strategy,Final Value,CAGR (%),MDD (%),Trades,Trade Cost,Out Ratio
-Buy & Hold,281189188.0,29.1,-24.25,1,149933.0,0.0
-Legacy (Clamp + Immediate Reentry),227322721.0,22.49,-24.22,17,4734732.0,0.1686
-Chandelier + Reentry 3-Rules,191947943.0,17.48,-15.73,35,13883994.0,0.3588
-SMA200 Filter Only,231836014.0,23.09,-17.84,19,6427563.0,0.2127
-Chandelier + Lockout,172316904.0,14.39,-15.73,31,11584254.0,0.4137

@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from stock_trader.config import DB_PATH
+from stock_trader.config import DB_PATH, PROJECT_DIR
 from stock_trader.data.db_repository import DbRepository
 import stock_trader.core.indicators as ind
 import stock_trader.core.signals as sig
@@ -33,33 +33,37 @@ def calculate_mdd(equity_curve: List[float]) -> float:
     drawdowns = (arr - cum_max) / cum_max * 100.0
     return float(np.min(drawdowns))
 
-def run_strategy_a(df: pd.DataFrame, initial_cash: float) -> Dict[str, Any]:
+def run_strategy_a(df: pd.DataFrame, initial_cash: float, fee_rate: float) -> Dict[str, Any]:
     """Strategy (a): Buy & Hold"""
     if df.empty:
         return {}
-    
+
+    half_fee = fee_rate / 2
     first_row = df.iloc[0]
     last_row = df.iloc[-1]
-    
-    # Buy at the first open
+
+    # Buy at the first open (one-way half of round-trip fee)
     buy_price = float(first_row['Open'])
-    shares = int(initial_cash / buy_price)
-    cash_left = initial_cash - (shares * buy_price)
-    
-    # Sell at the last close
+    shares = int(initial_cash * (1.0 - half_fee) / buy_price)
+    buy_cost = shares * buy_price
+    buy_fee = buy_cost * half_fee
+    cash_left = initial_cash - buy_cost - buy_fee
+
+    # Sell at the last close (one-way half of round-trip fee)
     sell_price = float(last_row['Close'])
-    final_val = cash_left + (shares * sell_price)
-    
+    sell_fee = shares * sell_price * half_fee
+    final_val = cash_left + (shares * sell_price) - sell_fee
+
     equity_curve = [initial_cash]
     for idx, row in df.iterrows():
         equity_curve.append(cash_left + (shares * float(row['Close'])))
-        
+
     return {
         "final_value": final_val,
         "cagr": calculate_cagr(final_val, initial_cash, len(df)/252.0),
         "mdd": calculate_mdd(equity_curve),
         "trade_count": 1,
-        "trade_cost": shares * buy_price * 0.0015, # One way buy fee assumed
+        "trade_cost": buy_fee + sell_fee,
         "out_of_market_ratio": 0.0,
         "equity_curve": equity_curve
     }
@@ -68,7 +72,8 @@ def run_strategy_b(df: pd.DataFrame, initial_cash: float, fee_rate: float) -> Di
     """Strategy (b): Legacy Approach (RSI/BB entry, yield-based trailing stop + 2~5% clamp + "+2% trigger", immediate reentry)"""
     if df.empty or len(df) < 120:
         return {}
-        
+
+    half_fee = fee_rate / 2
     closes = df['Close']
     rsi_14 = ind.rsi(closes, 14)
     lower_band, _, upper_band = ind.bollinger(closes, 20, 2.0)
@@ -118,8 +123,8 @@ def run_strategy_b(df: pd.DataFrame, initial_cash: float, fee_rate: float) -> Di
                 # Sell next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    proceeds = shares * next_open * (1.0 - fee_rate)
-                    trade_cost += shares * next_open * fee_rate
+                    proceeds = shares * next_open * (1.0 - half_fee)
+                    trade_cost += shares * next_open * half_fee
                     cash = proceeds
                     shares = 0
                     trade_count += 1
@@ -145,10 +150,10 @@ def run_strategy_b(df: pd.DataFrame, initial_cash: float, fee_rate: float) -> Di
                 # Buy next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    shares_to_buy = int(cash * (1.0 - fee_rate) / next_open)
+                    shares_to_buy = int(cash * (1.0 - half_fee) / next_open)
                     if shares_to_buy > 0:
                         cost = shares_to_buy * next_open
-                        trade_cost += cost * fee_rate
+                        trade_cost += cost * half_fee
                         cash -= cost
                         shares = shares_to_buy
                         buy_price = next_open
@@ -173,7 +178,8 @@ def run_strategy_c(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
     """Strategy (c): Chandelier Stop + 3-way Reentry Rules"""
     if df.empty or len(df) < params.trend_sma_period:
         return {}
-        
+
+    half_fee = fee_rate / 2
     cash = initial_cash
     shares = 0
     buy_price = 0.0
@@ -205,8 +211,8 @@ def run_strategy_c(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
                 # Sell next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    proceeds = shares * next_open * (1.0 - fee_rate)
-                    trade_cost += shares * next_open * fee_rate
+                    proceeds = shares * next_open * (1.0 - half_fee)
+                    trade_cost += shares * next_open * half_fee
                     cash = proceeds
                     shares = 0
                     trade_count += 1
@@ -229,10 +235,10 @@ def run_strategy_c(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
                 # Buy next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    shares_to_buy = int(cash * (1.0 - fee_rate) / next_open)
+                    shares_to_buy = int(cash * (1.0 - half_fee) / next_open)
                     if shares_to_buy > 0:
                         cost = shares_to_buy * next_open
-                        trade_cost += cost * fee_rate
+                        trade_cost += cost * half_fee
                         cash -= cost
                         shares = shares_to_buy
                         buy_price = next_open
@@ -257,7 +263,8 @@ def run_strategy_d(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
     """Strategy (d): SMA200 filter only"""
     if df.empty or len(df) < params.trend_sma_period:
         return {}
-        
+
+    half_fee = fee_rate / 2
     cash = initial_cash
     shares = 0
     trade_count = 0
@@ -277,8 +284,8 @@ def run_strategy_d(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
                 # Sell next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    proceeds = shares * next_open * (1.0 - fee_rate)
-                    trade_cost += shares * next_open * fee_rate
+                    proceeds = shares * next_open * (1.0 - half_fee)
+                    trade_cost += shares * next_open * half_fee
                     cash = proceeds
                     shares = 0
                     trade_count += 1
@@ -290,10 +297,10 @@ def run_strategy_d(df: pd.DataFrame, initial_cash: float, fee_rate: float, param
                 # Buy next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    shares_to_buy = int(cash * (1.0 - fee_rate) / next_open)
+                    shares_to_buy = int(cash * (1.0 - half_fee) / next_open)
                     if shares_to_buy > 0:
                         cost = shares_to_buy * next_open
-                        trade_cost += cost * fee_rate
+                        trade_cost += cost * half_fee
                         cash -= cost
                         shares = shares_to_buy
                         trade_count += 1
@@ -316,7 +323,8 @@ def run_strategy_e(df: pd.DataFrame, index_df: pd.DataFrame, initial_cash: float
     """Strategy (e): Chandelier Stop + Reentry + Lockout (Triggered on Index KODEX 200 SMA50 break or KODEX 200 daily return <= -3%)"""
     if df.empty or len(df) < params.trend_sma_period or index_df.empty:
         return {}
-        
+
+    half_fee = fee_rate / 2
     cash = initial_cash
     shares = 0
     buy_price = 0.0
@@ -370,8 +378,8 @@ def run_strategy_e(df: pd.DataFrame, index_df: pd.DataFrame, initial_cash: float
                 # Sell next day open
                 if t + 1 < len(df):
                     next_open = float(df['Open'].iloc[t+1])
-                    proceeds = shares * next_open * (1.0 - fee_rate)
-                    trade_cost += shares * next_open * fee_rate
+                    proceeds = shares * next_open * (1.0 - half_fee)
+                    trade_cost += shares * next_open * half_fee
                     cash = proceeds
                     shares = 0
                     trade_count += 1
@@ -395,10 +403,10 @@ def run_strategy_e(df: pd.DataFrame, index_df: pd.DataFrame, initial_cash: float
                     # Buy next day open
                     if t + 1 < len(df):
                         next_open = float(df['Open'].iloc[t+1])
-                        shares_to_buy = int(cash * (1.0 - fee_rate) / next_open)
+                        shares_to_buy = int(cash * (1.0 - half_fee) / next_open)
                         if shares_to_buy > 0:
                             cost = shares_to_buy * next_open
-                            trade_cost += cost * fee_rate
+                            trade_cost += cost * half_fee
                             cash -= cost
                             shares = shares_to_buy
                             buy_price = next_open
@@ -448,7 +456,7 @@ def main():
     
     # Run Strategies
     if args.strategy in ("all", "a"):
-        results["Buy & Hold"] = run_strategy_a(eval_df, args.cash)
+        results["Buy & Hold"] = run_strategy_a(eval_df, args.cash, args.fee)
         
     if args.strategy in ("all", "b"):
         # Strategy B needs MA120, so keep 120 days of history before start
@@ -500,7 +508,9 @@ def main():
     # Save Report to CSV
     try:
         report_df = pd.DataFrame(rows)
-        csv_filename = f"backtest_report_{args.ticker}.csv"
+        reports_dir = os.path.join(PROJECT_DIR, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        csv_filename = os.path.join(reports_dir, f"backtest_report_{args.ticker}.csv")
         report_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
         print(f"[Success] CSV report saved: {csv_filename}")
     except Exception as save_e:
