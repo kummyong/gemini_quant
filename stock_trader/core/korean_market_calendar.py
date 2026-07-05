@@ -27,7 +27,22 @@ def is_market_holiday(dt: datetime.datetime) -> bool:
     # 주말 체크 (5: 토요일, 6: 일요일)
     if dt.weekday() >= 5:
         return True
-    
+
     # 공휴일 및 휴장일 체크
     date_str = dt.strftime("%Y-%m-%d")
     return date_str in KRX_HOLIDAYS
+
+def is_first_trading_day_of_month(dt: datetime.datetime) -> bool:
+    """
+    dt가 해당 월의 첫 거래일(주말/휴장일 제외)이면 True 반환.
+    ETF 분배금/수정주가 반영을 위한 월 1회 강제 전체 재조회(force_full) 트리거용.
+    """
+    if is_market_holiday(dt):
+        return False
+
+    cursor = dt.replace(day=1)
+    while cursor.date() < dt.date():
+        if not is_market_holiday(cursor):
+            return False
+        cursor += datetime.timedelta(days=1)
+    return True

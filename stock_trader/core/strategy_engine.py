@@ -22,6 +22,8 @@ from stock_trader.communication.ipc_messenger import IpcPublisher
 from stock_trader.broker.broker_factory import BrokerFactory
 import stock_trader.core.indicators as ind
 import stock_trader.core.signals as sig
+import stock_trader.core.reconciler as reconciler
+from stock_trader.core.korean_market_calendar import is_first_trading_day_of_month
 from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, ACTIVE_STRATEGY_PROFILE, STOCK_MULTIFACTOR, ETF_TREND, ETF_UNIVERSE
 LOG_PATH = os.path.join(LOG_DIR, "strategy_engine.log")
 
@@ -330,12 +332,19 @@ class StrategyEngine:
     def fetch_market_data(self) -> List[Dict]:
         logger.info("실제 시장 데이터 수집 시작...")
         sample_data = StrategyEngine.SAMPLE_DATA if StrategyEngine.SAMPLE_DATA else self.SAMPLE_DATA
+
+        # 매월 첫 거래일에는 ETF 분배금/수정주가 소급 반영을 위해 전체 재조회(force_full) 수행
+        now_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
+        force_full_sync = is_first_trading_day_of_month(now_kst)
+        if force_full_sync:
+            logger.info("🗓️ 이번 달 첫 거래일 감지: OHLCV 전체 재조회(force_full)로 수정주가/분배금을 반영합니다.")
+
         raw_stocks_data = []
         for ticker, name in sample_data:
             df_hist = pd.DataFrame()
             try:
                 if self.repo:
-                    self.repo.sync_ohlcv_data(ticker)
+                    self.repo.sync_ohlcv_data(ticker, force_full=force_full_sync)
                     df_hist = self.repo.get_recent_ohlcv(ticker, limit=150)
             except Exception as db_e:
                 logger.error(f"[{name}] DB 동기화 또는 조회 중 오류: {db_e}")
@@ -343,7 +352,6 @@ class StrategyEngine:
             if df_hist.empty:
                 try:
                     import FinanceDataReader as fdr
-                    import datetime
                     df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=150)).strftime('%Y-%m-%d'))
                 except Exception as fdr_e:
                     logger.error(f"[{name}] FinanceDataReader 조회 실패: {fdr_e}")
@@ -1167,11 +1175,18 @@ class StrategyEngine:
         scored_stocks = self.calculate_scores(market_data)
         top_5 = scored_stocks[:5]
         top_tickers = [s["ticker"] for s in top_5]
-        
+
+        active_brokers = BrokerFactory.get_active_brokers()
+
+        # 신호 생성 직전 포지션 대사: 어긋난 원장 위에서 매매 판단을 내리지 않는다.
+        if not self._reconcile_positions(active_brokers):
+            logger.critical("🚨 포지션 대사 실패로 금일 신호 생성을 중단합니다.")
+            logger.info("==========================================")
+            return
+
         holdings = self.fetch_current_holdings()
         sell_signals = self.generate_management_signals(holdings, top_tickers, market_data)
-        
-        active_brokers = BrokerFactory.get_active_brokers()
+
         if self.profile == ETF_TREND:
             buy_signals = self._generate_etf_buy_signals(active_brokers, holdings, sell_signals, market_data)
             self.update_signals(buy_signals, sell_signals)
@@ -1186,6 +1201,25 @@ class StrategyEngine:
         self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
         logger.info("엔진 실행 완료")
         logger.info("==========================================")
+
+    def _reconcile_positions(self, active_brokers) -> bool:
+        """일일 사이클에서 신호 생성 직전 브로커 실계좌와 DB 포지션 기록을 대사한다.
+        API/DB 오류 등으로 대사에 실패하면 False를 반환하여 어긋난 원장 위에서
+        매매 신호를 생성하지 않도록 호출부(run)가 해당일 사이클을 중단시킨다."""
+        if not self.repo:
+            return True
+        all_ok = True
+        for b_name in active_brokers:
+            try:
+                broker = BrokerFactory.get_broker(b_name)
+            except Exception as e:
+                logger.error(f"❌ [Reconcile] {b_name} 브로커 초기화 실패: {e}")
+                all_ok = False
+                continue
+            result = reconciler.reconcile(b_name, broker, self.repo)
+            if not result.get("success"):
+                all_ok = False
+        return all_ok
 
     def _generate_etf_buy_signals(self, active_brokers, holdings, sell_signals, market_data):
         buy_signals = []
