@@ -1,5 +1,5 @@
 #!/bin/bash
-BASE_DIR="/root/workspace/gemini-quant"
+BASE_DIR="$(dirname "$(realpath "$0")")"
 LOG_DIR="$BASE_DIR/stock_trader/logs"
 
 mkdir -p $LOG_DIR
@@ -12,6 +12,6 @@ if pgrep -f "unified_watchdog.py" > /dev/null; then
 fi
 
 echo "🚀 Gemini Quant 서비스를 시작합니다..."
-nohup python3 unified_watchdog.py > $LOG_DIR/unified_watchdog.out 2>&1 &
+setsid python3 -u unified_watchdog.py > $LOG_DIR/unified_watchdog.out 2>&1
 
 echo "✅ 시작 완료. 로그 확인: tail -f $LOG_DIR/unified_watchdog.log"

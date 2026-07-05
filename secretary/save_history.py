@@ -12,7 +12,7 @@ DB_DIR = os.path.join(HISTORY_DIR, "database")
 
 # 설정: Gemini 로그가 저장되는 상위 폴더
 LOG_BASE_DIR = "/root/.gemini/tmp"
-CONTEXT_PATH = "/root/last_session_context.txt"
+CONTEXT_PATH = "/root/workspace/GEMINI.md"
 
 def get_latest_db():
     # 가장 최근의 history_*.db 파일을 찾음
