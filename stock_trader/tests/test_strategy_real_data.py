@@ -20,11 +20,37 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.db_patcher = patch('stock_trader.core.strategy_engine.DB_PATH', self.test_db_path)
         self.mock_db = self.db_patcher.start()
         
+        # We patch FinanceDataReader.DataReader to avoid live internet requests during mock tests
+        self.fdr_patcher = patch('FinanceDataReader.DataReader')
+        self.mock_fdr = self.fdr_patcher.start()
+        import pandas as pd
+        # Return a mock DataFrame with enough rows to pass (>20 rows for moving averages)
+        dates = pd.date_range(end='2026-07-05', periods=50)
+        self.mock_fdr.return_value = pd.DataFrame({
+            'Open': [10000.0] * 50,
+            'High': [10100.0] * 50,
+            'Low': [9900.0] * 50,
+            'Close': [10000.0] * 50,
+            'Volume': [100000] * 50,
+            'Change': [0.0] * 50
+        }, index=dates)
+        
         self.engine = StrategyEngine()
+        if self.engine.dart_scorer:
+            self.engine.dart_scorer.get_financial_score = MagicMock(return_value={
+                "revenue_growth": 0.0,
+                "op_profit_growth": 0.0,
+                "debt_ratio": 100.0,
+                "cash_flow_quality": 50.0,
+                "dart_available": False
+            })
+            self.engine.dart_scorer.get_dividend_yield = MagicMock(return_value=0.0)
+            self.engine.dart_scorer.get_major_shareholder_signal = MagicMock(return_value=0.0)
 
     def tearDown(self):
         self.sleep_patcher.stop()
         self.db_patcher.stop()
+        self.fdr_patcher.stop()
         
         # Clean up test database if it exists
         if os.path.exists(self.test_db_path):

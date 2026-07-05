@@ -62,18 +62,22 @@ def run_watchdog():
         from stock_trader.core.korean_market_calendar import is_market_holiday
         is_today_holiday = is_market_holiday(now)
         
-        # [스케줄링] 전략 엔진 실행 (장 운영일 08:30:00 ~ 08:30:30 사이 한 번만)
-        if not is_today_holiday and now.hour == 8 and now.minute == 30:
+        # [스케줄링] 전략 엔진 실행 (장 운영일 기준 프로파일별 시간 조정)
+        from stock_trader.config import ACTIVE_STRATEGY_PROFILE, ETF_TREND
+        if ACTIVE_STRATEGY_PROFILE == ETF_TREND:
+            target_hour, target_minute = 15, 45  # 장 마감 후 1일 1회 실행
+        else:
+            target_hour, target_minute = 8, 30   # 개장 전 실행
+            
+        if not is_today_holiday and now.hour == target_hour and now.minute == target_minute:
             today_str = now.strftime("%Y-%m-%d")
             if last_strategy_run != today_str:
-                log("📅 [Schedule] 전략 엔진 자동 실행 시간 (08:30)")
+                log(f"📅 [Schedule] 전략 엔진 자동 실행 시간 ({target_hour:02d}:{target_minute:02d})")
                 strategy_path = os.path.join(BASE_DIR, "stock_trader/core/strategy_engine.py")
                 try:
                     subprocess.run([VENV_PYTHON, strategy_path], env=env, check=True)
                     log("✨ [Schedule] 전략 엔진 실행 완료")
                     last_strategy_run = today_str
-                    # 중복 방지를 위해 기존 제네릭 메시지는 주석 처리합니다. 상세 정보는 strategy_engine.py에서 직접 보냅니다.
-                    # send_telegram_message("🤖 [전략] 오늘 자 전략 종목 선정이 완료되었습니다.")
                 except Exception as e:
                     log(f"❌ [Schedule] 전략 엔진 실행 실패: {e}")
 

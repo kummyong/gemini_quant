@@ -29,3 +29,20 @@ MODEL_PATH = os.path.join(LOG_DIR, "intent_model.pkl")
 RUNTIME_DIR = os.path.join(STOCK_TRADER_DIR, "runtime")
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 
+# 전략 프로파일 정의
+STOCK_MULTIFACTOR = "STOCK_MULTIFACTOR"
+ETF_TREND = "ETF_TREND"
+
+# 현재 활성 전략 프로파일 (환경 변수에서 불러오거나 기본값으로 STOCK_MULTIFACTOR 지정)
+ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", STOCK_MULTIFACTOR)
+
+# ETF 유니버스 리스트 (ticker, name)
+ETF_UNIVERSE = [
+    ("069500", "KODEX 200"),
+    ("133690", "TIGER 미국나스닥100"),
+    ("360750", "TIGER 미국S&P500"),
+    ("132030", "KODEX 골드선물(H)"),
+    ("114260", "KODEX 국고채3년"),
+    ("329200", "TIGER 리츠부동산인프라")
+]
+
