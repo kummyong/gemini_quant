@@ -1297,6 +1297,13 @@ class StrategyEngine:
                         "features": json.dumps(feat, ensure_ascii=False)
                     })
                     logger.info(f"📋 [{b_name}] [{signal_type}] 매수 신호: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 가중치: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
+
+                    if last_stop_record and self.repo:
+                        try:
+                            self.repo.clear_stopped_position(ticker, self.profile)
+                            logger.info(f"🔓 [{ticker}] 재진입 확정으로 쿨다운 기록 해제 (stopped_positions 삭제)")
+                        except Exception as clear_e:
+                            logger.error(f"[{ticker}] 쿨다운 기록 해제 실패: {clear_e}")
         return buy_signals
 
     def _generate_stock_buy_signals(self, active_brokers, holdings, sell_signals, top_5):

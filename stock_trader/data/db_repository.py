@@ -411,6 +411,12 @@ class DbRepository:
             cursor.execute("SELECT ticker, stop_date, stop_price, profile FROM stopped_positions WHERE profile = ?", (profile,))
             return [dict(row) for row in cursor.fetchall()]
 
+    def clear_stopped_position(self, ticker: str, profile: str):
+        """재진입이 확정된 티커의 stopped_positions 기록을 삭제합니다 (쿨다운 해제)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM stopped_positions WHERE ticker = ? AND profile = ?", (ticker, profile))
+
     def update_market_lockout(self, active: bool, since: str = None, reason: str = None):
         """시장 락아웃 상태를 업데이트합니다."""
         with self.get_connection() as conn:

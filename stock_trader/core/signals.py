@@ -63,17 +63,25 @@ def can_reenter(df: pd.DataFrame, stop_record: Optional[Dict[str, Any]], params:
     if stop_record:
         stop_date_str = stop_record.get("stop_date")
         if stop_date_str:
-            # df의 DatetimeIndex 또는 string 형식 index에서 stop_date 이후의 거래일 계산
-            dates = df.index.strftime('%Y-%m-%d').tolist()
-            if stop_date_str in dates:
-                stop_idx = dates.index(stop_date_str)
-                # 현재 봉의 인덱스 - 정지 인덱스 = 경과된 거래일 수
-                elapsed_days = len(df) - 1 - stop_idx
-                if elapsed_days < params.stop_cooldown_days:
-                    return False
-            else:
-                # 데이터프레임 내에 정지일이 없으면 보수적으로 경과하지 않은 것으로 처리
+            if df.empty:
                 return False
+            # stop_date가 df의 첫 날짜보다 과거이면(윈도우 밖으로 밀려난 경우) 쿨다운은
+            # 이미 경과한 것으로 간주한다. 그렇지 않으면 df.index에서 stop_date를 찾을 수
+            # 없어 영구적으로 재진입이 차단되는 버그가 발생한다.
+            if pd.Timestamp(stop_date_str) < df.index[0]:
+                pass
+            else:
+                # df의 DatetimeIndex 또는 string 형식 index에서 stop_date 이후의 거래일 계산
+                dates = df.index.strftime('%Y-%m-%d').tolist()
+                if stop_date_str in dates:
+                    stop_idx = dates.index(stop_date_str)
+                    # 현재 봉의 인덱스 - 정지 인덱스 = 경과된 거래일 수
+                    elapsed_days = len(df) - 1 - stop_idx
+                    if elapsed_days < params.stop_cooldown_days:
+                        return False
+                else:
+                    # 윈도우 내부 범위인데 정지일이 없으면 보수적으로 경과하지 않은 것으로 처리
+                    return False
 
     # 2. 종가 > SMA(reentry_sma_period) 검사
     if df.empty or len(df) < params.reentry_sma_period:

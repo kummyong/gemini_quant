@@ -106,6 +106,29 @@ def test_reentry_cooldown():
     stop_record = {"stop_date": dates_str[-10]}
     assert can_reenter(df, stop_record, params, today) is True
 
+def test_reentry_cooldown_stop_before_window():
+    """stop_date가 df 윈도우의 첫 날짜보다 과거이면 쿨다운 경과로 처리되어야 한다.
+    (회귀 테스트: 과거 버그는 dates 리스트에서 stop_date를 찾지 못해 영구적으로 False를 반환했음)"""
+    df = create_mock_df(size=100, trend_type="up")
+    params = StrategyParams(stop_cooldown_days=5, reentry_sma_period=20, trend_sma_period=50)
+    today = df.index[-1].strftime('%Y-%m-%d')
+
+    stop_date_before_window = (df.index[0] - pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+    stop_record = {"stop_date": stop_date_before_window}
+
+    assert can_reenter(df, stop_record, params, today) is True
+
+def test_reentry_cooldown_stop_before_window_blocked_by_trend():
+    """쿨다운은 경과 처리되더라도 추세/재진입 SMA 조건을 통과하지 못하면 여전히 차단되어야 한다"""
+    df = create_mock_df(size=100, trend_type="down")
+    params = StrategyParams(stop_cooldown_days=5, reentry_sma_period=20, trend_sma_period=50)
+    today = df.index[-1].strftime('%Y-%m-%d')
+
+    stop_date_before_window = (df.index[0] - pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+    stop_record = {"stop_date": stop_date_before_window}
+
+    assert can_reenter(df, stop_record, params, today) is False
+
 def test_market_lockout():
     df = create_mock_df(size=100, trend_type="up")
     params = StrategyParams()
