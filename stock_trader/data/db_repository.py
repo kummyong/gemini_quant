@@ -309,6 +309,37 @@ class DbRepository:
                     last_updated = excluded.last_updated
             """, (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate))
 
+    def reconcile_portfolio_holding(self, broker_id: str, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float):
+        """브로커 실계좌 값으로 포지션을 갱신합니다 (계좌가 진실, DB는 사본).
+        신규 등록 시 peak_close(=max_profit_rate 0.0, 즉 평균단가 자체)로 초기화하고,
+        기존 레코드가 있으면 전략 상태인 max_profit_rate는 절대 덮어쓰지 않습니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO portfolio_status (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, datetime('now', 'localtime'))
+                ON CONFLICT(broker_id, stk_cd) DO UPDATE SET
+                    stk_nm = excluded.stk_nm,
+                    rmnd_qty = excluded.rmnd_qty,
+                    pur_pric = excluded.pur_pric,
+                    cur_prc = excluded.cur_prc,
+                    prft_rt = excluded.prft_rt,
+                    last_updated = excluded.last_updated
+            """, (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt))
+
+    def delete_portfolio_holding(self, broker_id: str, stk_cd: str):
+        """지정된 브로커/종목의 포지션 기록을 삭제합니다 (유령 포지션 정리 등)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM portfolio_status WHERE broker_id = ? AND stk_cd = ?", (broker_id, stk_cd))
+
+    def clear_all_portfolio_holdings(self, broker_id: str):
+        """지정된 브로커의 모든 포지션 기록을 일괄 삭제합니다 (계좌 리셋 감지 시 사용).
+        stopped_positions, market_lockout은 별도 테이블이므로 영향받지 않습니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM portfolio_status WHERE broker_id = ?", (broker_id,))
+
     def get_strategy_hyperparams(self) -> dict:
         """전략 하이퍼파라미터 전량 조회"""
         with self.get_connection() as conn:
