@@ -252,7 +252,12 @@ class DbRepository:
                 ("BULL_RSI", 30.0),
                 ("BULL_BB", 2.0),
                 ("BEAR_RSI", 25.0),
-                ("BEAR_BB", 2.2)
+                ("BEAR_BB", 2.2),
+                ("ETF_ATR_PERIOD", 20.0),
+                ("ETF_ATR_MULTIPLIER", 3.0),
+                ("ETF_TREND_SMA_PERIOD", 200.0),
+                ("ETF_REENTRY_SMA_PERIOD", 50.0),
+                ("ETF_STOP_COOLDOWN_DAYS", 5.0)
             ]
             for key, val in initial_params:
                 cursor.execute("""

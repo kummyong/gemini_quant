@@ -1103,8 +1103,7 @@ class StrategyEngine:
                     emoji = "📈" if h["profit_rate"] >= 0 else "📉"
                     lines.append(f"  {emoji} [{h.get('broker_id')}] {h['name']}: {h['profit_rate']:+.2f}%")
                     
-            from stock_trader.config import ETF_TREND
-            if self.profile == ETF_TREND:
+            if self.profile == ETF_TREND and self.repo:
                 lines.append("")
                 lines.append("🛡️ *[ETF 샹들리에 스탑 현황]*")
                 sig_params = getattr(self, 'strategy_params', sig.StrategyParams())
@@ -1172,7 +1171,6 @@ class StrategyEngine:
         holdings = self.fetch_current_holdings()
         sell_signals = self.generate_management_signals(holdings, top_tickers, market_data)
         
-        from stock_trader.config import ETF_TREND
         active_brokers = BrokerFactory.get_active_brokers()
         if self.profile == ETF_TREND:
             buy_signals = self._generate_etf_buy_signals(active_brokers, holdings, sell_signals, market_data)
@@ -1192,6 +1190,13 @@ class StrategyEngine:
     def _generate_etf_buy_signals(self, active_brokers, holdings, sell_signals, market_data):
         buy_signals = []
         lockout_active = False
+        sig_params = sig.StrategyParams(
+            atr_period=self.ETF_ATR_PERIOD,
+            atr_multiplier=self.ETF_ATR_MULTIPLIER,
+            trend_sma_period=self.ETF_TREND_SMA_PERIOD,
+            reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
+            stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
+        )
         if self.repo:
             lockout_state = self.repo.get_market_lockout()
             kodex_df = pd.DataFrame()
@@ -1199,14 +1204,6 @@ class StrategyEngine:
                 kodex_df = self.repo.get_recent_ohlcv("069500", limit=300)
             except Exception as e:
                 logger.error(f"KODEX 200 데이터 로드 실패: {e}")
-            
-            sig_params = sig.StrategyParams(
-                atr_period=self.ETF_ATR_PERIOD,
-                atr_multiplier=self.ETF_ATR_MULTIPLIER,
-                trend_sma_period=self.ETF_TREND_SMA_PERIOD,
-                reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
-                stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
-            )
             lockout_active = sig.market_lockout(kodex_df, lockout_state, sig_params)
             if lockout_state.get("active") and not lockout_active:
                 logger.info("🔓 시장 락아웃 해제 조건 충족 (KODEX 200 종가 > SMA50). 락아웃을 비활성화합니다.")
@@ -1252,14 +1249,6 @@ class StrategyEngine:
                     if ticker_stops:
                         ticker_stops = sorted(ticker_stops, key=lambda x: x["stop_date"], reverse=True)
                         last_stop_record = ticker_stops[0]
-                
-                sig_params = sig.StrategyParams(
-                    atr_period=self.ETF_ATR_PERIOD,
-                    atr_multiplier=self.ETF_ATR_MULTIPLIER,
-                    trend_sma_period=self.ETF_TREND_SMA_PERIOD,
-                    reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
-                    stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
-                )
                 
                 if last_stop_record:
                     is_buy_eligible = sig.can_reenter(df_hist, last_stop_record, sig_params, today_str)
