@@ -20,7 +20,9 @@ from stock_trader.data.dart_financial_scorer import DartFinancialScorer
 from stock_trader.data.db_repository import DbRepository
 from stock_trader.communication.ipc_messenger import IpcPublisher
 from stock_trader.broker.broker_factory import BrokerFactory
-from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH
+import stock_trader.core.indicators as ind
+import stock_trader.core.signals as sig
+from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, ACTIVE_STRATEGY_PROFILE, STOCK_MULTIFACTOR, ETF_TREND, ETF_UNIVERSE
 LOG_PATH = os.path.join(LOG_DIR, "strategy_engine.log")
 
 # ── 기존 팩터 가중치 (네이버 금융 기반) ──
@@ -81,6 +83,19 @@ class StrategyEngine:
         self.publisher = ipc_publisher
         self.is_system_locked = False
         self.lock_reason = ""
+        
+        self.profile = ACTIVE_STRATEGY_PROFILE
+        if self.profile == ETF_TREND:
+            self.SAMPLE_DATA = ETF_UNIVERSE
+            logger.info(f"🛡️ [ETF_TREND] 프로파일 로드됨. 유니버스 크기: {len(self.SAMPLE_DATA)}")
+        else:
+            if StrategyEngine.SAMPLE_DATA:
+                self.SAMPLE_DATA = StrategyEngine.SAMPLE_DATA
+            else:
+                from stock_trader.core.stock_universe import SAMPLE_TICKERS
+                self.SAMPLE_DATA = SAMPLE_TICKERS
+            logger.info(f"💼 [STOCK_MULTIFACTOR] 프로파일 로드됨. 유니버스 크기: {len(self.SAMPLE_DATA)}")
+
         self._init_session()
         self._init_dart()
         self._load_hyperparams()
@@ -134,7 +149,12 @@ class StrategyEngine:
             "BEAR_BB": 2.2,
             "RSI_SELL_THRES": 70.0,
             "TRAILING_STOP_DROP": 3.0,
-            "HARD_STOP_LOSS": -5.0
+            "HARD_STOP_LOSS": -5.0,
+            "ETF_ATR_PERIOD": 20.0,
+            "ETF_ATR_MULTIPLIER": 3.0,
+            "ETF_TREND_SMA_PERIOD": 200.0,
+            "ETF_REENTRY_SMA_PERIOD": 50.0,
+            "ETF_STOP_COOLDOWN_DAYS": 5.0
         }
         try:
             if self.repo:
@@ -158,6 +178,12 @@ class StrategyEngine:
         self.RSI_SELL_THRES = params["RSI_SELL_THRES"]
         self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
+        
+        self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
+        self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
+        self.ETF_TREND_SMA_PERIOD = int(params["ETF_TREND_SMA_PERIOD"])
+        self.ETF_REENTRY_SMA_PERIOD = int(params["ETF_REENTRY_SMA_PERIOD"])
+        self.ETF_STOP_COOLDOWN_DAYS = int(params["ETF_STOP_COOLDOWN_DAYS"])
 
     def _calculate_adx(self, df, period=14):
         try:
@@ -303,7 +329,7 @@ class StrategyEngine:
         self.session.mount('https://', adapter)
     def fetch_market_data(self) -> List[Dict]:
         logger.info("실제 시장 데이터 수집 시작...")
-        sample_data = self.SAMPLE_DATA
+        sample_data = StrategyEngine.SAMPLE_DATA if StrategyEngine.SAMPLE_DATA else self.SAMPLE_DATA
         raw_stocks_data = []
         for ticker, name in sample_data:
             df_hist = pd.DataFrame()
@@ -337,109 +363,6 @@ class StrategyEngine:
             net_buying = 0.0
             current_price = 0.0
             
-            # 사전 필터링(Pre-filtering) 적용: 동전주(1000원 미만) 및 거래대금 미달(5억 미만)
-            try:
-                if df_hist.empty or len(df_hist) < 5:
-                    logger.info(f"⏭️ [{name}] 데이터 부족으로 1차 필터 스킵")
-                    continue
-                
-                latest_close = float(df_hist['Close'].iloc[-1])
-                avg_vol_5d = float(df_hist['Volume'].tail(5).mean())
-                avg_value_5d = latest_close * avg_vol_5d
-                
-                if latest_close < 1000:
-                    logger.info(f"⏭️ [{name}] 동전주 필터링 (최신가: {latest_close:,.0f}원 < 1,000원)")
-                    continue
-                    
-                if avg_value_5d < 500_000_000: # 5억 원
-                    logger.info(f"⏭️ [{name}] 거래대금 부족 필터링 (5일 평균: {avg_value_5d/1e8:.1f}억 < 5억)")
-                    continue
-            except Exception as filter_e:
-                logger.warning(f"⚠️ [{name}] 1차 필터링 검사 실패: {filter_e}")
-            
-            # Naver crawling for fundamental data
-            try:
-                main_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-                res = self.session.get(main_url, verify=False, timeout=10)
-                res.encoding = 'utf-8'
-                soup = BeautifulSoup(res.text, 'lxml')
-                
-                match = re.search(r'업종명\s*:\s*<a[^>]*>([^<]+)</a>', res.text)
-                if match:
-                    industry_name = match.group(1).strip()
-                
-                div = soup.find('div', class_='section cop_analysis')
-                if div:
-                    table = div.find('table')
-                    if table:
-                        tr_years = table.find_all('tr')[1]
-                        years = [th.get_text(strip=True) for th in tr_years.find_all('th')]
-                        eps_row = None
-                        for tr in table.find_all('tr'):
-                            th_text = tr.find('th')
-                            if th_text and 'EPS(원)' in th_text.get_text(strip=True):
-                                eps_row = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
-                                break
-                        if eps_row and len(years) >= 2 and len(eps_row) >= 2:
-                            annual_eps = []
-                            for y, eps in zip(years, eps_row):
-                                if re.match(r'\d{4}\.\d{2}', y) and '(E)' not in y:
-                                    try:
-                                        annual_eps.append(float(eps) if eps and eps != '-' else 0.0)
-                                    except ValueError:
-                                        pass
-                            if len(annual_eps) >= 2:
-                                latest_eps = annual_eps[-1]
-                                prev_eps = annual_eps[-2]
-                                if prev_eps != 0:
-                                    eps_growth = ((latest_eps - prev_eps) / abs(prev_eps)) * 100
-                
-                now_val_div = soup.find('p', class_='no_today')
-                if now_val_div:
-                    blind_span = now_val_div.find('span', class_='blind')
-                    if blind_span:
-                        current_price = float(blind_span.get_text(strip=True).replace(',', ''))
-            except Exception as e:
-                logger.error(f"[{name}] 메인 정보 파싱 실패: {e}")
-                
-            # Fallback for current price from local DB hist
-            if current_price == 0.0 and not df_hist.empty:
-                current_price = float(df_hist['Close'].iloc[-1])
-                logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
-
-            try:
-                frgn_url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
-                res = self.session.get(frgn_url, verify=False, timeout=10)
-                res.encoding = 'euc-kr'
-                soup = BeautifulSoup(res.text, 'lxml')
-                tables = soup.find_all('table', class_='type2')
-                target_table = None
-                for t in tables:
-                    if '기관' in t.get_text() and '외국인' in t.get_text():
-                        target_table = t
-                        break
-                if target_table:
-                    total_net_buying_krw = 0.0
-                    day_count = 0
-                    for tr in target_table.find_all('tr'):
-                        tds = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
-                        if len(tds) >= 9 and re.match(r'\d{4}\.\d{2}\.\d{2}', tds[0]):
-                            try:
-                                price_val = float(tds[1])
-                                if current_price == 0.0 and day_count == 0:
-                                    current_price = price_val
-                                inst_vol = float(tds[5]) if tds[5] and tds[5] != '-' else 0.0
-                                foreign_vol = float(tds[6]) if tds[6] and tds[6] != '-' else 0.0
-                                total_net_buying_krw += (inst_vol + foreign_vol) * price_val
-                                day_count += 1
-                                if day_count >= 5:
-                                    break
-                            except ValueError:
-                                pass
-                    net_buying = total_net_buying_krw / 100000000.0
-            except Exception as e:
-                logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
-                
             dart_revenue_growth = 0.0
             dart_op_growth = 0.0
             dart_debt_ratio = 100.0
@@ -448,19 +371,127 @@ class StrategyEngine:
             dart_major_shareholder_bonus = 0.0
             dart_available = False
             
-            if self.dart_scorer:
+            # STOCK_MULTIFACTOR 프로파일일 때만 거래대금/동전주 필터링 적용
+            if self.profile != ETF_TREND:
                 try:
-                    fin_score = self.dart_scorer.get_financial_score(ticker)
-                    dart_revenue_growth = fin_score["revenue_growth"]
-                    dart_op_growth = fin_score["op_profit_growth"]
-                    dart_debt_ratio = fin_score["debt_ratio"]
-                    dart_cf_quality = fin_score["cash_flow_quality"]
-                    dart_available = fin_score["dart_available"]
-                    dart_dividend_yield = self.dart_scorer.get_dividend_yield(ticker)
-                    dart_major_shareholder_bonus = self.dart_scorer.get_major_shareholder_signal(ticker)
-                    time.sleep(0.3)
-                except Exception as dart_e:
-                    logger.warning(f"[{name}] DART 데이터 조회 실패 (무시): {dart_e}")
+                    if df_hist.empty or len(df_hist) < 5:
+                        logger.info(f"⏭️ [{name}] 데이터 부족으로 1차 필터 스킵")
+                        continue
+                    
+                    latest_close = float(df_hist['Close'].iloc[-1])
+                    avg_vol_5d = float(df_hist['Volume'].tail(5).mean())
+                    avg_value_5d = latest_close * avg_vol_5d
+                    
+                    if latest_close < 1000:
+                        logger.info(f"⏭️ [{name}] 동전주 필터링 (최신가: {latest_close:,.0f}원 < 1,000원)")
+                        continue
+                        
+                    if avg_value_5d < 500_000_000: # 5억 원
+                        logger.info(f"⏭️ [{name}] 거래대금 부족 필터링 (5일 평균: {avg_value_5d/1e8:.1f}억 < 5억)")
+                        continue
+                except Exception as filter_e:
+                    logger.warning(f"⚠️ [{name}] 1차 필터링 검사 실패: {filter_e}")
+                
+                # Naver crawling for fundamental data
+                try:
+                    main_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+                    res = self.session.get(main_url, verify=False, timeout=10)
+                    res.encoding = 'utf-8'
+                    soup = BeautifulSoup(res.text, 'lxml')
+                    
+                    match = re.search(r'업종명\s*:\s*<a[^>]*>([^<]+)</a>', res.text)
+                    if match:
+                        industry_name = match.group(1).strip()
+                    
+                    div = soup.find('div', class_='section cop_analysis')
+                    if div:
+                        table = div.find('table')
+                        if table:
+                            tr_years = table.find_all('tr')[1]
+                            years = [th.get_text(strip=True) for th in tr_years.find_all('th')]
+                            eps_row = None
+                            for tr in table.find_all('tr'):
+                                th_text = tr.find('th')
+                                if th_text and 'EPS(원)' in th_text.get_text(strip=True):
+                                    eps_row = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
+                                    break
+                            if eps_row and len(years) >= 2 and len(eps_row) >= 2:
+                                annual_eps = []
+                                for y, eps in zip(years, eps_row):
+                                    if re.match(r'\d{4}\.\d{2}', y) and '(E)' not in y:
+                                        try:
+                                            annual_eps.append(float(eps) if eps and eps != '-' else 0.0)
+                                        except ValueError:
+                                            pass
+                                if len(annual_eps) >= 2:
+                                    latest_eps = annual_eps[-1]
+                                    prev_eps = annual_eps[-2]
+                                    if prev_eps != 0:
+                                        eps_growth = ((latest_eps - prev_eps) / abs(prev_eps)) * 100
+                    
+                    now_val_div = soup.find('p', class_='no_today')
+                    if now_val_div:
+                        blind_span = now_val_div.find('span', class_='blind')
+                        if blind_span:
+                            current_price = float(blind_span.get_text(strip=True).replace(',', ''))
+                except Exception as e:
+                    logger.error(f"[{name}] 메인 정보 파싱 실패: {e}")
+                    
+                # Fallback for current price from local DB hist
+                if current_price == 0.0 and not df_hist.empty:
+                    current_price = float(df_hist['Close'].iloc[-1])
+                    logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
+
+                try:
+                    frgn_url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
+                    res = self.session.get(frgn_url, verify=False, timeout=10)
+                    res.encoding = 'euc-kr'
+                    soup = BeautifulSoup(res.text, 'lxml')
+                    tables = soup.find_all('table', class_='type2')
+                    target_table = None
+                    for t in tables:
+                        if '기관' in t.get_text() and '외국인' in t.get_text():
+                            target_table = t
+                            break
+                    if target_table:
+                        total_net_buying_krw = 0.0
+                        day_count = 0
+                        for tr in target_table.find_all('tr'):
+                            tds = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
+                            if len(tds) >= 9 and re.match(r'\d{4}\.\d{2}\.\d{2}', tds[0]):
+                                try:
+                                    price_val = float(tds[1])
+                                    if current_price == 0.0 and day_count == 0:
+                                        current_price = price_val
+                                    inst_vol = float(tds[5]) if tds[5] and tds[5] != '-' else 0.0
+                                    foreign_vol = float(tds[6]) if tds[6] and tds[6] != '-' else 0.0
+                                    total_net_buying_krw += (inst_vol + foreign_vol) * price_val
+                                    day_count += 1
+                                    if day_count >= 5:
+                                        break
+                                except ValueError:
+                                    pass
+                        net_buying = total_net_buying_krw / 100000000.0
+                except Exception as e:
+                    logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
+                    
+                if self.dart_scorer:
+                    try:
+                        fin_score = self.dart_scorer.get_financial_score(ticker)
+                        dart_revenue_growth = fin_score["revenue_growth"]
+                        dart_op_growth = fin_score["op_profit_growth"]
+                        dart_debt_ratio = fin_score["debt_ratio"]
+                        dart_cf_quality = fin_score["cash_flow_quality"]
+                        dart_available = fin_score["dart_available"]
+                        dart_dividend_yield = self.dart_scorer.get_dividend_yield(ticker)
+                        dart_major_shareholder_bonus = self.dart_scorer.get_major_shareholder_signal(ticker)
+                        time.sleep(0.3)
+                    except Exception as dart_e:
+                        logger.warning(f"[{name}] DART 데이터 조회 실패 (무시): {dart_e}")
+            else:
+                industry_name = "ETF"
+                if not df_hist.empty:
+                    current_price = float(df_hist['Close'].iloc[-1])
             
             rsi_val = 50.0
             lower_band = 0.0
@@ -579,21 +610,21 @@ class StrategyEngine:
         try:
             industry_groups = {}
             for s in real_stocks:
-                ind = s["industry_name"]
-                if ind not in industry_groups:
-                    industry_groups[ind] = []
-                industry_groups[ind].append(s["return_5d"])
+                ind_name = s["industry_name"]
+                if ind_name not in industry_groups:
+                    industry_groups[ind_name] = []
+                industry_groups[ind_name].append(s["return_5d"])
                 
             industry_momentum = {}
-            for ind, returns in industry_groups.items():
-                industry_momentum[ind] = sum(returns) / len(returns)
+            for ind_name, returns in industry_groups.items():
+                industry_momentum[ind_name] = sum(returns) / len(returns)
                 
             for s in real_stocks:
-                ind = s["industry_name"]
-                avg_ret_5d = industry_momentum.get(ind, 0.0)
+                ind_name = s["industry_name"]
+                avg_ret_5d = industry_momentum.get(ind_name, 0.0)
                 score = 57.5 + avg_ret_5d * 5.0
                 s["industry_score"] = max(20.0, min(95.0, score))
-                logger.info(f"📂 [{s['name']}] 업종: {ind} | 5일 섹터 모멘텀: {avg_ret_5d:+.2f}% | 업종 점수: {s['industry_score']:.1f}")
+                logger.info(f"📂 [{s['name']}] 업종: {ind_name} | 5일 섹터 모멘텀: {avg_ret_5d:+.2f}% | 업종 점수: {s['industry_score']:.1f}")
         except Exception as sec_e:
             logger.error(f"주간 섹터 모멘텀 계산 오류: {sec_e}")
             
@@ -840,6 +871,64 @@ class StrategyEngine:
                     })
             except Exception as tg_e:
                 logger.warning(f"글로벌 손절 IPC 알림 전송 실패: {tg_e}")
+            if self.repo:
+                self.repo.update_market_lockout(active=True, since=datetime.datetime.now().strftime("%Y-%m-%d"), reason=f"글로벌 Hard Stop 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%)")
+            return sell_signals
+
+        if self.profile == ETF_TREND:
+            for stock in current_holdings:
+                ticker = stock["ticker"]
+                quantity = stock["quantity"]
+                b_id = stock.get("broker_id", "KIWOOM")
+                
+                df_hist = pd.DataFrame()
+                s_data = market_map.get(ticker, {})
+                try:
+                    if self.repo:
+                        df_hist = self.repo.get_recent_ohlcv(ticker, limit=300)
+                except Exception as e:
+                    logger.error(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
+                
+                if df_hist.empty:
+                    logger.warning(f"⚠️ [{stock['name']}] OHLCV 데이터가 없어 청산 검사를 스킵합니다.")
+                    continue
+                
+                sig_params = sig.StrategyParams(
+                    atr_period=self.ETF_ATR_PERIOD,
+                    atr_multiplier=self.ETF_ATR_MULTIPLIER,
+                    trend_sma_period=self.ETF_TREND_SMA_PERIOD,
+                    reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
+                    stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
+                )
+                
+                pos_status = {
+                    "pur_pric": stock.get("purchase_price", 0.0),
+                    "max_profit_rate": stock.get("max_profit_rate", 0.0),
+                    "peak_close": stock.get("purchase_price", 0.0) * (1 + stock.get("max_profit_rate", 0.0) / 100.0)
+                }
+                
+                exit_sig = sig.check_exit(df_hist, pos_status, sig_params)
+                if exit_sig:
+                    feat = self._build_feature_dict(s_data, {
+                        "exit_reason": "chandelier_stop",
+                        "profit_rate": stock["profit_rate"],
+                        "max_profit_rate": stock.get("max_profit_rate", 0.0),
+                        "stop_level": exit_sig["stop_level"]
+                    })
+                    sell_signals.append({
+                        "broker_id": b_id,
+                        "ticker": ticker,
+                        "name": stock["name"],
+                        "action": "SELL",
+                        "quantity": quantity,
+                        "reason": exit_sig["reason"],
+                        "features": json.dumps(feat, ensure_ascii=False)
+                    })
+                    logger.warning(f"⚠️ [{b_id}][ETF 청산] {stock['name']} 샹들리에 스탑 도달 청산: {exit_sig['reason']}")
+                    
+                    if self.repo:
+                        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                        self.repo.save_stopped_position(ticker, today_str, float(df_hist['Close'].iloc[-1]), self.profile)
             return sell_signals
 
         for stock in current_holdings:
@@ -1013,6 +1102,50 @@ class StrategyEngine:
                 for h in holdings:
                     emoji = "📈" if h["profit_rate"] >= 0 else "📉"
                     lines.append(f"  {emoji} [{h.get('broker_id')}] {h['name']}: {h['profit_rate']:+.2f}%")
+                    
+            from stock_trader.config import ETF_TREND
+            if self.profile == ETF_TREND:
+                lines.append("")
+                lines.append("🛡️ *[ETF 샹들리에 스탑 현황]*")
+                sig_params = getattr(self, 'strategy_params', sig.StrategyParams())
+                for h in holdings:
+                    ticker = h["ticker"]
+                    df_hist = self.repo.get_recent_ohlcv(ticker, limit=150)
+                    if not df_hist.empty:
+                        purchase_price = float(h.get("pur_pric", 0.0))
+                        max_profit_rate = float(h.get("max_profit_rate", 0.0))
+                        peak_close = purchase_price * (1 + max_profit_rate / 100.0)
+                        stop_level = sig.chandelier_stop_level(df_hist, peak_close, sig_params)
+                        current_close = float(df_hist['Close'].iloc[-1])
+                        dist_pct = (current_close - stop_level) / current_close * 100.0
+                        lines.append(f"  · {h['name']} ({ticker}): 스탑가 {stop_level:,.0f}원 (거리 {dist_pct:+.2f}%)")
+                
+                # Check Lockout status
+                lockout = self.repo.get_market_lockout()
+                status_str = "활성" if lockout.get("active") else "비활성"
+                lines.append(f"🔒 *시장 락아웃 상태*: {status_str}")
+                if lockout.get("active"):
+                    lines.append(f"  · 사유: {lockout.get('reason')} (시작일: {lockout.get('since')})")
+                
+                # Check Cooldown status
+                cooldowns = self.repo.get_stopped_positions(self.profile)
+                active_cooldowns = []
+                for c in cooldowns:
+                    ticker = c["ticker"]
+                    df_hist = self.repo.get_recent_ohlcv(ticker, limit=150)
+                    if not df_hist.empty:
+                        dates = df_hist.index.strftime('%Y-%m-%d').tolist()
+                        stop_date = c.get("stop_date")
+                        if stop_date in dates:
+                            stop_idx = dates.index(stop_date)
+                            elapsed = len(df_hist) - 1 - stop_idx
+                            if elapsed < sig_params.stop_cooldown_days:
+                                remaining = sig_params.stop_cooldown_days - elapsed
+                                active_cooldowns.append(f"{ticker} ({remaining}일)")
+                if active_cooldowns:
+                    lines.append(f"⏳ *쿨다운 제한 중인 종목*: {', '.join(active_cooldowns)}")
+                else:
+                    lines.append("⏳ *쿨다운 제한 중인 종목*: 없음")
             
             lines.append("━━━━━━━━━━━━━━")
             msg = "\n".join(lines)
@@ -1039,10 +1172,146 @@ class StrategyEngine:
         holdings = self.fetch_current_holdings()
         sell_signals = self.generate_management_signals(holdings, top_tickers, market_data)
         
-        buy_signals = []
+        from stock_trader.config import ETF_TREND
         active_brokers = BrokerFactory.get_active_brokers()
-        
-        # 스코어 기반 차등 분배를 위한 총합 스코어 계산
+        if self.profile == ETF_TREND:
+            buy_signals = self._generate_etf_buy_signals(active_brokers, holdings, sell_signals, market_data)
+            self.update_signals(buy_signals, sell_signals)
+            self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
+            logger.info("엔진 실행 완료")
+            logger.info("==========================================")
+            return
+        else:
+            buy_signals = self._generate_stock_buy_signals(active_brokers, holdings, sell_signals, top_5)
+
+        self.update_signals(buy_signals, sell_signals)
+        self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
+        logger.info("엔진 실행 완료")
+        logger.info("==========================================")
+
+    def _generate_etf_buy_signals(self, active_brokers, holdings, sell_signals, market_data):
+        buy_signals = []
+        lockout_active = False
+        if self.repo:
+            lockout_state = self.repo.get_market_lockout()
+            kodex_df = pd.DataFrame()
+            try:
+                kodex_df = self.repo.get_recent_ohlcv("069500", limit=300)
+            except Exception as e:
+                logger.error(f"KODEX 200 데이터 로드 실패: {e}")
+            
+            sig_params = sig.StrategyParams(
+                atr_period=self.ETF_ATR_PERIOD,
+                atr_multiplier=self.ETF_ATR_MULTIPLIER,
+                trend_sma_period=self.ETF_TREND_SMA_PERIOD,
+                reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
+                stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
+            )
+            lockout_active = sig.market_lockout(kodex_df, lockout_state, sig_params)
+            if lockout_state.get("active") and not lockout_active:
+                logger.info("🔓 시장 락아웃 해제 조건 충족 (KODEX 200 종가 > SMA50). 락아웃을 비활성화합니다.")
+                self.repo.update_market_lockout(active=False)
+
+        if getattr(self, 'is_system_locked', False) or lockout_active:
+            logger.warning(f"🚨 [ETF 매수 중단] 시스템 락 또는 시장 락아웃 상태입니다. (system_locked={self.is_system_locked}, lockout={lockout_active})")
+            return buy_signals
+
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        for b_name in active_brokers:
+            remaining_cash = self.BROKER_CASH.get(b_name, 0.0)
+            broker_equity = self.BROKER_EQUITY.get(b_name, 0.0)
+            if remaining_cash <= 0:
+                continue
+            
+            for s in market_data:
+                ticker = s["ticker"]
+                name = s["name"]
+                price = s["price"]
+                atr_pct = s.get("atr_pct", 3.0)
+                
+                is_held = any(h["ticker"] == ticker and h["broker_id"] == b_name for h in holdings)
+                is_selling = any(sel["ticker"] == ticker and sel.get("broker_id") == b_name for sel in sell_signals)
+                
+                if is_held or is_selling:
+                    continue
+                    
+                df_hist = pd.DataFrame()
+                try:
+                    if self.repo:
+                        df_hist = self.repo.get_recent_ohlcv(ticker, limit=300)
+                except Exception as e:
+                    logger.error(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
+                
+                if df_hist.empty:
+                    continue
+                    
+                last_stop_record = None
+                if self.repo:
+                    stopped_list = self.repo.get_stopped_positions(self.profile)
+                    ticker_stops = [st for st in stopped_list if st["ticker"] == ticker]
+                    if ticker_stops:
+                        ticker_stops = sorted(ticker_stops, key=lambda x: x["stop_date"], reverse=True)
+                        last_stop_record = ticker_stops[0]
+                
+                sig_params = sig.StrategyParams(
+                    atr_period=self.ETF_ATR_PERIOD,
+                    atr_multiplier=self.ETF_ATR_MULTIPLIER,
+                    trend_sma_period=self.ETF_TREND_SMA_PERIOD,
+                    reentry_sma_period=self.ETF_REENTRY_SMA_PERIOD,
+                    stop_cooldown_days=self.ETF_STOP_COOLDOWN_DAYS
+                )
+                
+                if last_stop_record:
+                    is_buy_eligible = sig.can_reenter(df_hist, last_stop_record, sig_params, today_str)
+                    signal_type = "ETF 재진입"
+                else:
+                    is_buy_eligible = sig.trend_ok(df_hist, sig_params)
+                    signal_type = "ETF 신규진입"
+                    
+                if not is_buy_eligible:
+                    continue
+                    
+                if price > 0 and remaining_cash > 0:
+                    size_factor = max(0.5, min(1.5, 3.0 / atr_pct))
+                    adjusted_weight = self.TARGET_WEIGHT * size_factor
+                    target_amt = min(
+                        broker_equity * adjusted_weight,
+                        self.BROKER_CASH.get(b_name, 0.0) * self.MAX_SINGLE_ORDER_RATIO,
+                        remaining_cash
+                    )
+                    quantity = int(target_amt / price)
+                    
+                    if quantity <= 0:
+                        continue
+                        
+                    order_cost = quantity * price
+                    if order_cost > remaining_cash:
+                        quantity = int(remaining_cash / price)
+                        order_cost = quantity * price
+                        
+                    if quantity <= 0:
+                        continue
+                        
+                    remaining_cash -= order_cost
+                    reason = f"[{signal_type}] 종가 {price:,.0f}원 | ATR_PCT:{atr_pct:.2f}"
+                    feat = self._build_feature_dict(s, {
+                        "signal_type": signal_type,
+                        "atr_pct": atr_pct
+                    })
+                    buy_signals.append({
+                        "broker_id": b_name,
+                        "ticker": ticker,
+                        "name": name,
+                        "action": "BUY",
+                        "quantity": quantity,
+                        "reason": reason,
+                        "features": json.dumps(feat, ensure_ascii=False)
+                    })
+                    logger.info(f"📋 [{b_name}] [{signal_type}] 매수 신호: {name} {quantity}주 × {price:,.0f}원 = {order_cost:,.0f}원 (ATR%: {atr_pct:.1f}%, 가중치: {size_factor:.2f}x, 잔여: {remaining_cash:,.0f}원)")
+        return buy_signals
+
+    def _generate_stock_buy_signals(self, active_brokers, holdings, sell_signals, top_5):
+        buy_signals = []
         total_score_sum = sum(s["total_score"] for s in top_5) if top_5 else 1.0
         
         for b_name in active_brokers:
@@ -1073,12 +1342,8 @@ class StrategyEngine:
                 
                 is_rsi_match = rsi_val <= self.RSI_BUY_THRES
                 is_bb_match = (lower_band > 0) and (price <= lower_band)
-
-                # [전략 A] 역추세: RSI 과매도 OR BB 하단 (둘 중 하나만 충족해도 진입)
                 is_mean_reversion = is_rsi_match or is_bb_match
-
-                # [전략 B] 추세추종: BULL/SIDEWAY 국면 + MA 정배열 + RSI 건강구간 + 코스피 대비 상대강도 우위
-                # RSI 45~65: 추세 중이나 과매수 아닌 구간 (이전 RSI 90 추격매수 재발 방지)
+                
                 regime_now = getattr(self, 'current_regime', '')
                 is_trend_following = (
                     regime_now in ("BULL", "SIDEWAY") and
@@ -1087,7 +1352,7 @@ class StrategyEngine:
                     s.get("relative_momentum", 0.0) > 3.0 and
                     s.get("is_bottoming", True)
                 )
-
+                
                 if is_mean_reversion:
                     signal_type = "역추세"
                     weight_multiplier = 1.0
@@ -1095,7 +1360,6 @@ class StrategyEngine:
                         logger.info(f"⏭️ [{b_name}] {name}: RSI 조건 부합하나 하락세 미멈춤으로 매수 스킵")
                         continue
                 elif is_trend_following:
-                    # SIDEWAY 국면은 불확실성 반영해 포지션 50%로 제한, BULL은 70%
                     weight_multiplier = 0.5 if regime_now == "SIDEWAY" else 0.7
                     signal_type = f"추세추종({'SIDEWAY' if regime_now == 'SIDEWAY' else 'BULL'})"
                     logger.info(f"📈 [{b_name}] {name}: 추세추종 진입 조건 부합 (RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}%, 국면: {regime_now})")
@@ -1106,39 +1370,38 @@ class StrategyEngine:
                         f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | 국면: {regime_now})"
                     )
                     continue
-
+                    
                 if price > 0 and remaining_cash > 0:
                     score_ratio = (score / total_score_sum) * len(top_5)
                     size_factor = max(0.5, min(1.5, 3.0 / atr_pct)) * weight_multiplier
                     adjusted_weight = self.TARGET_WEIGHT * score_ratio * size_factor
-
+                    
                     target_amt = min(
                         broker_equity * adjusted_weight,
                         self.BROKER_CASH.get(b_name, 0.0) * self.MAX_SINGLE_ORDER_RATIO,
                         remaining_cash
                     )
                     quantity = int(target_amt / price)
-
+                    
                     if quantity <= 0:
                         logger.info(f"⏭️ [{b_name}] {name}: 예수금 대비 단가가 높아 매수 스킵 (단가: {price:,.0f}원, 가용금: {target_amt:,.0f}원)")
                         continue
-
+                        
                     order_cost = quantity * price
                     if order_cost > remaining_cash:
                         quantity = int(remaining_cash / price)
                         order_cost = quantity * price
-
+                        
                     if quantity <= 0:
                         logger.info(f"⏭️ [{b_name}] {name}: 잔여 예수금 부족으로 매수 스킵")
                         continue
-
+                        
                     remaining_cash -= order_cost
-
                     if signal_type == "역추세":
                         reason = f"[역추세] RSI: {rsi_val:.1f}, BB하단: {lower_band:,.0f}원 | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{lower_band:.2f}"
                     else:
                         reason = f"[추세추종] RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | ATR_PCT:{atr_pct:.2f} | TARGET_PRICE:{price:.2f}"
-
+                        
                     buy_signals.append({
                         "broker_id": b_name,
                         "ticker": ticker,
@@ -1154,11 +1417,7 @@ class StrategyEngine:
                         logger.info(f"⏭️ [{b_name}] {name}: 예수금 소진으로 매수 스킵")
                     else:
                         logger.info(f"⏭️ [{b_name}] {name}: 가격 정보 없음으로 매수 스킵")
-
-        self.update_signals(buy_signals, sell_signals)
-        self._send_strategy_report(scored_stocks, buy_signals, sell_signals, holdings)
-        logger.info("엔진 실행 완료")
-        logger.info("==========================================")
+        return buy_signals
 
 if __name__ == "__main__":
     repo = DbRepository(DB_PATH)

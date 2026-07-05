@@ -210,6 +210,28 @@ class DbRepository:
             )
             """)
 
+            # 10. stopped_positions (샹들리에 스탑 청산된 포지션 관리 - 쿨다운용)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stopped_positions (
+                ticker TEXT NOT NULL,
+                stop_date TEXT NOT NULL,
+                stop_price REAL,
+                profile TEXT NOT NULL,
+                PRIMARY KEY (ticker, stop_date)
+            )
+            """)
+
+            # 11. market_lockout (시장 락아웃 상태 기록)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_lockout (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                active INTEGER DEFAULT 0 CHECK(active IN (0, 1)),
+                since TEXT,
+                reason TEXT
+            )
+            """)
+            cursor.execute("INSERT OR IGNORE INTO market_lockout (id, active, since, reason) VALUES (1, 0, NULL, NULL)")
+
             # --- 인덱스 설정 최적화 ---
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks (status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time ON scheduled_tasks (scheduled_at)")
@@ -299,7 +321,7 @@ class DbRepository:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp, mem_total, mem_used, mem_avail, mem_pct))
 
-    def sync_ohlcv_data(self, ticker: str, force_full: bool = False):
+    def sync_ohlcv_data(self, ticker: str, force_full: bool = False, backfill_days: int = 200):
         """웹에서 종목의 최신 OHLCV 데이터를 조회하여 DB에 차분(Delta) 병합합니다."""
         try:
             import FinanceDataReader as fdr
@@ -309,7 +331,7 @@ class DbRepository:
             KST = pytz.timezone('Asia/Seoul')
             now = datetime.now(KST)
             
-            start_date = (now - timedelta(days=200)).strftime('%Y-%m-%d')
+            start_date = (now - timedelta(days=backfill_days)).strftime('%Y-%m-%d')
             
             if not force_full:
                 with self.get_connection() as conn:
@@ -352,12 +374,12 @@ class DbRepository:
         except Exception as e:
             logger.error(f"[{ticker}] OHLCV 동기화 중 오류: {e}")
 
-    def get_recent_ohlcv(self, ticker: str, limit: int = 150):
+    def get_recent_ohlcv(self, ticker: str, limit: int = 300):
         """DB에서 가장 최신 OHLCV 데이터를 Pandas DataFrame으로 반환합니다."""
         import pandas as pd
         with self.get_connection() as conn:
-            query = f"SELECT date as Date, open as Open, high as High, low as Low, close as Close, volume as Volume, change as Change FROM ohlcv_data WHERE ticker = '{ticker}' ORDER BY date DESC LIMIT {limit}"
-            df = pd.read_sql_query(query, conn)
+            query = "SELECT date as Date, open as Open, high as High, low as Low, close as Close, volume as Volume, change as Change FROM ohlcv_data WHERE ticker = ? ORDER BY date DESC LIMIT ?"
+            df = pd.read_sql_query(query, conn, params=(ticker, limit))
             if df.empty:
                 return df
             
@@ -366,4 +388,41 @@ class DbRepository:
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
             return df
+
+    def save_stopped_position(self, ticker: str, stop_date: str, stop_price: float, profile: str):
+        """스탑 청산된 포지션을 저장합니다 (쿨다운 추적용)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO stopped_positions (ticker, stop_date, stop_price, profile)
+                VALUES (?, ?, ?, ?)
+            """, (ticker, stop_date, stop_price, profile))
+
+    def get_stopped_positions(self, profile: str) -> list:
+        """지정된 프로파일의 모든 stopped_positions 조회"""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticker, stop_date, stop_price, profile FROM stopped_positions WHERE profile = ?", (profile,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_market_lockout(self, active: bool, since: str = None, reason: str = None):
+        """시장 락아웃 상태를 업데이트합니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO market_lockout (id, active, since, reason)
+                VALUES (1, ?, ?, ?)
+            """, (1 if active else 0, since, reason))
+
+    def get_market_lockout(self) -> dict:
+        """시장 락아웃 상태를 조회합니다."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT active, since, reason FROM market_lockout WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return {"active": 0, "since": None, "reason": None}
 
