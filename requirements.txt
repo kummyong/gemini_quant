@@ -1,0 +1,32 @@
+# gemini_quant 의존성 목록
+# 설치: pip install -r requirements.txt
+
+# 데이터 수집·처리
+FinanceDataReader
+pandas
+numpy
+requests
+beautifulsoup4
+
+# ML (인텐트 분류)
+scikit-learn
+joblib
+
+# 시각화 (트렌드 리포트)
+matplotlib
+
+# 시간대·시스템
+pytz
+psutil
+python-dotenv
+
+# Google API (secretary)
+google-api-python-client
+google-auth-oauthlib
+google-generativeai
+
+# MCP 서버 (텔레그램·Google)
+mcp
+
+# 개발·테스트
+pytest

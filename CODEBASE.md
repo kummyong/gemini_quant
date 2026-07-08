@@ -215,22 +215,22 @@ trainer.retrain_model
 
 | 프로세스 | 설명 |
 |---------|------|
+| `auto_trader.py` | 주식 자동매매 엔진 |
 | `telegram_listener.py` | 챗봇 데몬 |
 | `notification_gateway.py` | IPC → 텔레그램 게이트웨이 |
 | `system_monitor_loop.py` | 시스템 모니터링 루프 |
 | `auto_sync_history.py` | 대화 기록 동기화 |
-| `mcp_google_server.py` | Google MCP 서버 |
 
-- **스케줄**:
+- **스케줄** (정각 일치가 아닌 30분 윈도우 + 일 1회 가드 방식):
 
 | 시각 | 작업 |
 |------|------|
-| 08:30 KST (영업일) | `strategy_engine.py` 실행 |
+| 08:30 KST (영업일, ETF_TREND 프로파일은 15:45) | `strategy_engine.py` 실행 (timeout 30분) |
 | 15:40 KST (영업일) | `summary_trader.py` 마감 보고 |
 | 30분 간격 (장중) | `dart_disclosure_monitor.py` 공시 감시 |
-| 매월 1일 | `dart_universe_expander.py` 유니버스 확장 |
+| 매월 1일 08:00 | `dart_universe_expander.py` 유니버스 확장 |
 
-- **재시작 간격**: 10초 주기 체크, 비정상 종료 시 즉시 재구동
+- **재시작 간격**: 10초 주기 체크, 비정상 종료 시 즉시 재구동 (로그 파일 핸들은 재시작 시 회수)
 
 ---
 

@@ -14,25 +14,34 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 def send_telegram_message(message):
-    """텔레그램으로 메시지를 전송합니다."""
+    """텔레그램으로 메시지를 전송합니다.
+    Markdown 파싱 실패(종목명 내 '_' 등 특수문자) 시 일반 텍스트로 재전송하여 알림 유실을 방지합니다."""
     if not TOKEN or not CHAT_ID:
         print("❌ [Telegram] 토큰 또는 채팅 ID가 설정되지 않았습니다.")
         return False
-        
+
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "Markdown"
     }
-    
+
     try:
         res = requests.post(url, data=data, timeout=10)
         if res.status_code == 200:
             return True
-        else:
-            print(f"❌ [Telegram] 전송 실패: {res.text}")
-            return False
+
+        # Markdown 파싱 오류(400)면 서식 없이 재전송
+        if res.status_code == 400:
+            plain = {"chat_id": CHAT_ID, "text": message}
+            res2 = requests.post(url, data=plain, timeout=10)
+            if res2.status_code == 200:
+                print("⚠️ [Telegram] Markdown 파싱 실패 → 일반 텍스트로 전송됨")
+                return True
+
+        print(f"❌ [Telegram] 전송 실패: {res.text}")
+        return False
     except Exception as e:
         print(f"❌ [Telegram] 오류 발생: {e}")
         return False

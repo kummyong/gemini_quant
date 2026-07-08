@@ -69,20 +69,23 @@ def run_watchdog():
         else:
             target_hour, target_minute = 8, 30   # 개장 전 실행
             
-        if not is_today_holiday and now.hour == target_hour and now.minute == target_minute:
+        # 정각(분) 일치 대신 30분 윈도우: 직전 작업이 오래 걸려 해당 분을 놓쳐도 실행됨
+        strategy_target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if not is_today_holiday and strategy_target <= now < strategy_target + timedelta(minutes=30):
             today_str = now.strftime("%Y-%m-%d")
             if last_strategy_run != today_str:
                 log(f"📅 [Schedule] 전략 엔진 자동 실행 시간 ({target_hour:02d}:{target_minute:02d})")
                 strategy_path = os.path.join(BASE_DIR, "stock_trader/core/strategy_engine.py")
                 try:
-                    subprocess.run([VENV_PYTHON, strategy_path], env=env, check=True)
+                    subprocess.run([VENV_PYTHON, strategy_path], env=env, check=True, timeout=1800)
                     log("✨ [Schedule] 전략 엔진 실행 완료")
                     last_strategy_run = today_str
                 except Exception as e:
                     log(f"❌ [Schedule] 전략 엔진 실행 실패: {e}")
 
-        # [스케줄링] 일일 마감 보고 (장 운영일 15:40:00 ~ 15:40:30 사이 한 번만)
-        if not is_today_holiday and now.hour == 15 and now.minute == 40:
+        # [스케줄링] 일일 마감 보고 (장 운영일 15:40 이후 30분 윈도우 내 한 번만)
+        summary_target = now.replace(hour=15, minute=40, second=0, microsecond=0)
+        if not is_today_holiday and summary_target <= now < summary_target + timedelta(minutes=30):
             today_str = now.strftime("%Y-%m-%d")
             if last_summary_run != today_str:
                 log("📅 [Schedule] 일일 마감 보고 전송")
@@ -92,7 +95,7 @@ def run_watchdog():
                          f"import sys; sys.path.insert(0, '{BASE_DIR}'); "
                          f"from stock_trader.core.summary_trader import send_daily_summary_to_telegram; "
                          f"send_daily_summary_to_telegram()"],
-                        env=env, check=True, timeout=30
+                        env=env, check=True, timeout=120  # 실계좌 조회 + 포지션 대사 시간 포함
                     )
                     last_summary_run = today_str
                     log("✨ [Schedule] 일일 마감 보고 전송 완료")
@@ -131,24 +134,32 @@ def run_watchdog():
             p_path = p_info["path"]
             p_name = p_info["name"]
             
+            entry = running_procs.get(p_path)
             # 프로세스가 없거나 종료된 경우
-            if p_path not in running_procs or running_procs[p_path].poll() is not None:
-                if p_path in running_procs:
-                    exit_code = running_procs[p_path].poll()
+            if entry is None or entry["proc"].poll() is not None:
+                if entry is not None:
+                    exit_code = entry["proc"].poll()
                     log(f"⚠️  [{p_name}] 종료됨 (Exit Code: {exit_code}). 재실행 중...")
-                    # send_telegram_message(f"⚠️  [Alert] {p_name} 프로세스가 종료되어 재실행합니다. (Code: {exit_code})")
-                
+                    # 재시작마다 로그 파일 핸들이 새로 열리므로 이전 핸들을 닫아 fd 누수 방지
+                    for f in entry["files"]:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+
                 # 현재 환경 변수와 함께 프로세스 실행
                 full_path = os.path.join(BASE_DIR, p_path)
                 try:
+                    f_out = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stdout.log"), "a")
+                    f_err = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stderr.log"), "a")
                     proc = subprocess.Popen(
                         [VENV_PYTHON, full_path],
                         cwd=p_info["cwd"],
                         env=env,
-                        stdout=open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stdout.log"), "a"),
-                        stderr=open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stderr.log"), "a")
+                        stdout=f_out,
+                        stderr=f_err
                     )
-                    running_procs[p_path] = proc
+                    running_procs[p_path] = {"proc": proc, "files": (f_out, f_err)}
                     log(f"✅ [{p_name}] 시작됨 (PID: {proc.pid})")
                 except Exception as e:
                     log(f"❌ [{p_name}] 시작 실패: {e}")

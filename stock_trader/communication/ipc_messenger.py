@@ -31,22 +31,23 @@ class IpcPublisher:
             return False
 
     def send_message_sync(self, event_type: str, payload: dict) -> bool:
-        """동기 코드 블록에서 호출 가능하도록 래핑한 동기식 전송 도구"""
+        """동기 코드 블록에서 호출 가능하도록 래핑한 동기식 전송 도구.
+        현재 스레드에 실행 중인 이벤트 루프가 있으면 그 위에서 블로킹 대기할 수 없으므로
+        (기존 run_coroutine_threadsafe + result() 조합은 자기 루프 대기 데드락 위험)
+        별도 스레드에서 전송을 완료하고 결과를 반환합니다."""
         try:
-            loop = asyncio.get_event_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        if loop.is_running():
-            # 이미 비동기 루프가 작동 중인 경우 Task로 예약 실행
-            future = asyncio.run_coroutine_threadsafe(self.send_message(event_type, payload), loop)
+            # 실행 중인 루프 없음 — 새 루프에서 즉시 실행
+            return asyncio.run(self.send_message(event_type, payload))
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, self.send_message(event_type, payload))
             try:
                 return future.result(timeout=5.0)
             except Exception:
                 return False
-        else:
-            return loop.run_until_complete(self.send_message(event_type, payload))
 
 
 class IpcListener:

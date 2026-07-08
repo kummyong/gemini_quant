@@ -7,7 +7,6 @@ import json
 import threading
 import requests
 import re
-import sqlite3
 from datetime import datetime
 import pytz
 
@@ -72,24 +71,43 @@ def load_context():
 def judge_feedback(text):
     text = text.lower().strip()
     if text in ["1", "2", "3"]: return "SELECT", text
-    pos_patterns = [r'^[ㅇy]+$', r'^(맞아|응|어|그래|오냐|맞음|네|예|좋아|오케이|ok|정답|그거야)']
+    # 문장 전체가 긍/부정 표현일 때만 매칭 (끝 앵커가 없으면 "어제 얼마 벌었어"가 "어"로 오판됨)
+    pos_patterns = [r'^[ㅇy]+$', r'^(맞아|응|어|그래|오냐|맞음|네|예|좋아|오케이|ok|정답|그거야)[요…~!\.\s]*$']
     if any(re.search(p, text) for p in pos_patterns): return "POSITIVE", None
-    neg_patterns = [r'^[ㄴn]+$', r'^(아니|틀려|아냐|그거아냐|잘못|오답|패스|다음|다른|ㄴㄴ|몰라|아니야|틀렸어)']
+    neg_patterns = [r'^[ㄴn]+$', r'^(아니야|아니|틀려|틀렸어|아냐|그거아냐|잘못|오답|패스|다음|다른|ㄴㄴ|몰라)[요…~!\.\s]*$']
     if any(re.search(p, text) for p in neg_patterns): return "NEGATIVE", None
     return "UNKNOWN", None
 
+_repo = None
+def get_repo():
+    global _repo
+    if _repo is None:
+        from stock_trader.data.db_repository import DbRepository
+        _repo = DbRepository(DB_PATH)
+    return _repo
+
 def get_local_db_best_match(text):
+    """과거 피드백과 문자 2-gram 자카드 유사도로 가장 유사한 인텐트를 찾습니다.
+    (단순 문자 집합 겹침은 무관한 문장도 쉽게 매칭되어 오탐이 많았음)"""
+    def bigrams(s):
+        s = re.sub(r'\s+', '', s)
+        return {s[i:i+2] for i in range(len(s) - 1)}
     try:
-        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT raw_text, actual_label FROM training_data ORDER BY created_at DESC LIMIT 100")
-            rows = cursor.fetchall()
-        best_intent, max_overlap = None, 0
-        for raw_text, label in rows:
-            overlap = len(set(text) & set(raw_text))
-            if overlap > max_overlap: max_overlap, best_intent = overlap, label
-        if max_overlap > 2: return best_intent
-    except: pass
+        query = bigrams(text)
+        if not query:
+            return None
+        best_intent, best_score = None, 0.0
+        for raw_text, label in get_repo().get_recent_training_data(100):
+            cand = bigrams(raw_text or "")
+            if not cand:
+                continue
+            score = len(query & cand) / len(query | cand)
+            if score > best_score:
+                best_score, best_intent = score, label
+        if best_score >= 0.5:
+            return best_intent
+    except Exception as e:
+        logger.warning(f"DB 유사 매칭 실패: {e}")
     return None
 
 def trigger_instant_learning():
@@ -121,7 +139,7 @@ def merge_params(old_params, new_params):
     return merged
 
 def get_ai_teacher_decision(text):
-    from agent_skills import SYSTEM_TOOLS, AVAILABLE_MODELS
+    from stock_trader.ai.agent_skills import SYSTEM_TOOLS, AVAILABLE_MODELS
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY: return None, {}, 0
     
@@ -168,26 +186,17 @@ def handle_system_update(text: str) -> str:
             return "❌ [SYSTEM_UPDATE_FAIL] 파라미터 추출 실패. 포맷을 확인하세요 (예: [SYSTEM_UPDATE] BB_STD=2.1)"
         
         updated_dict = {}
-        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            for key, val_str in pairs:
-                val = float(val_str)
-                # 키 매핑 (CUTOFF -> THRES 호환성 유지)
-                db_key = key
-                if key == "RSI_BUY_CUTOFF":
-                    db_key = "RSI_BUY_THRES"
-                elif key == "RSI_SELL_CUTOFF":
-                    db_key = "RSI_SELL_THRES"
-                
-                cursor.execute("""
-                    INSERT INTO strategy_hyperparams (param_key, param_value, updated_at)
-                    VALUES (?, ?, datetime('now', 'localtime'))
-                    ON CONFLICT(param_key) DO UPDATE SET
-                        param_value = excluded.param_value,
-                        updated_at = excluded.updated_at
-                """, (db_key, val))
-                updated_dict[key] = val
-            conn.commit()
+        for key, val_str in pairs:
+            val = float(val_str)
+            # 키 매핑 (CUTOFF -> THRES 호환성 유지)
+            db_key = key
+            if key == "RSI_BUY_CUTOFF":
+                db_key = "RSI_BUY_THRES"
+            elif key == "RSI_SELL_CUTOFF":
+                db_key = "RSI_SELL_THRES"
+
+            get_repo().upsert_hyperparam(db_key, val)
+            updated_dict[key] = val
         
         param_strs = [f"{k}={v}" for k, v in updated_dict.items()]
         logger.info(f"[System Update] 파라미터 DB 업데이트 완료: {updated_dict}")
@@ -215,7 +224,7 @@ def process_and_reply(text: str):
         if cmd == "help":
             return skill_router("get_help", {})
         elif cmd == "switch_ai_model":
-            from agent_skills import switch_ai_model
+            from stock_trader.ai.agent_skills import switch_ai_model
             return switch_ai_model(params_str)
             
         # 그 외 모든 슬래시 명령어는 skill_router로 직접 전달
@@ -321,6 +330,11 @@ def main():
                 for item in r.get("result", []):
                     offset = item["update_id"] + 1
                     msg = item.get("message", {})
+                    # 승인된 채팅(CHAT_ID)의 메시지만 처리 — 외부인의 주문/조회 명령 차단
+                    sender_chat_id = str(msg.get("chat", {}).get("id", ""))
+                    if sender_chat_id != str(CHAT_ID):
+                        logger.warning(f"🚫 미승인 발신자 메시지 무시 (chat_id: {sender_chat_id})")
+                        continue
                     text = msg.get("text")
                     if text:
                         reply = process_and_reply(text)

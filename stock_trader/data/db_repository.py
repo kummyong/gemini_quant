@@ -249,6 +249,9 @@ class DbRepository:
                 ("BB_STD", 2.0),
                 ("TRAILING_STOP_DROP", 3.0),
                 ("HARD_STOP_LOSS", -5.0),
+                ("CHANDELIER_ATR_MULT", 1.5),
+                ("TRAILING_MIN_DROP", 2.0),
+                ("TRAILING_MAX_DROP", 5.0),
                 ("BULL_RSI", 30.0),
                 ("BULL_BB", 2.0),
                 ("BEAR_RSI", 25.0),
@@ -346,6 +349,89 @@ class DbRepository:
             cursor = conn.cursor()
             cursor.execute("SELECT param_key, param_value FROM strategy_hyperparams")
             return {row[0]: float(row[1]) for row in cursor.fetchall()}
+
+    def upsert_hyperparam(self, param_key: str, param_value: float):
+        """하이퍼파라미터 단건 저장/갱신"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO strategy_hyperparams (param_key, param_value, updated_at)
+                VALUES (?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(param_key) DO UPDATE SET
+                    param_value = excluded.param_value,
+                    updated_at = excluded.updated_at
+            """, (param_key, param_value))
+
+    def get_max_profit_rates(self, broker_id: str) -> dict:
+        """지정 브로커 보유 종목의 stk_cd -> max_profit_rate 매핑 조회"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT stk_cd, max_profit_rate FROM portfolio_status WHERE broker_id = ?", (broker_id,))
+            return {row[0]: float(row[1]) if row[1] is not None else 0.0 for row in cursor.fetchall()}
+
+    def mark_holding_sold(self, broker_id: str, stk_cd: str):
+        """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE portfolio_status SET rmnd_qty = 0, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
+                (broker_id, stk_cd))
+
+    def save_trade_history(self, ticker: str, name: str, side: str, quantity: int, price: int, amt: int, reason: str, features: str = None):
+        """체결 이력 저장"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticker, name, side, quantity, price, amt, reason, features))
+
+    def get_pending_signals(self) -> list:
+        """PENDING 상태의 매매 신호 전량 조회"""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id, features FROM trade_signals WHERE status = 'PENDING'")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def complete_signal(self, signal_id: int):
+        """매매 신호를 DONE 상태로 갱신"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE trade_signals SET status = 'DONE' WHERE id = ?", (signal_id,))
+
+    def cancel_signal(self, signal_id: int, note: str = None):
+        """매매 신호를 CANCELLED 상태로 갱신 (note는 reason 뒤에 덧붙임)"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if note:
+                cursor.execute("UPDATE trade_signals SET status = 'CANCELLED', reason = reason || ? WHERE id = ?", (f" [{note}]", signal_id))
+            else:
+                cursor.execute("UPDATE trade_signals SET status = 'CANCELLED' WHERE id = ?", (signal_id,))
+
+    def save_account_snapshot(self, total_assets: int, cash: int, cash_ratio: float):
+        """계좌 요약 스냅샷 저장 (일일 마감 보고 시점 등에 기록)"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO account_summary (total_assets, cash, cash_ratio) VALUES (?, ?, ?)",
+                (total_assets, cash, cash_ratio))
+
+    def get_trades_on_date(self, date_str: str) -> list:
+        """지정 날짜(YYYY-MM-DD)의 체결 이력 조회"""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trade_history WHERE timestamp LIKE ? ORDER BY timestamp DESC",
+                (f"{date_str}%",))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_recent_training_data(self, limit: int = 100) -> list:
+        """최근 학습 피드백 (raw_text, actual_label) 조회"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT raw_text, actual_label FROM training_data ORDER BY created_at DESC LIMIT ?", (limit,))
+            return cursor.fetchall()
 
     def save_system_metric(self, timestamp: str, cpu_load_1m: float, cpu_usage: float, battery_level: str, cpu_temp: str, mem_total: int, mem_used: int, mem_avail: int, mem_pct: float):
         """시스템 하드웨어 메트릭 정보 저장"""
