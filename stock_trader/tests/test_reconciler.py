@@ -116,3 +116,34 @@ def test_broker_api_failure_returns_not_success(repo):
 
     assert result["success"] is False
     assert result["error"] is not None
+
+
+def test_all_zero_account_response_aborts_and_preserves_positions(repo):
+    """어댑터가 API 실패 시 반환하는 전부 0 폴백 응답(총자산·예수금 필드는 존재)을
+    계좌 리셋으로 오판해 정상 DB 포지션을 전량 삭제하면 안 된다."""
+    repo.update_portfolio_holding(
+        stk_cd="005930", stk_nm="삼성전자", rmnd_qty=10,
+        pur_pric=70000, cur_prc=72000, prft_rt=2.85, max_profit_rate=5.0,
+        broker_id="KIWOOM",
+    )
+    repo.update_portfolio_holding(
+        stk_cd="000660", stk_nm="SK하이닉스", rmnd_qty=5,
+        pur_pric=100000, cur_prc=105000, prft_rt=5.0, max_profit_rate=6.0,
+        broker_id="KIWOOM",
+    )
+
+    broker = MagicMock()
+    broker.get_account_summary.return_value = {
+        "tot_pur_amt": "0",
+        "tot_evlt_amt": "0",
+        "tot_prft_rt": "0.0",
+        "prsm_dpst_aset_amt": "0",
+        "acnt_evlt_remn_indv_tot": [],
+    }
+    result = reconcile("KIWOOM", broker, repo, notify=False)
+
+    assert result["success"] is False
+    assert result["account_reset_detected"] is False
+    assert result["error"] is not None
+    # 포지션이 보존되어야 함
+    assert len(repo.get_portfolio_holdings()) == 2

@@ -219,7 +219,9 @@ class TestRefactoring(unittest.TestCase):
                 conn.commit()
 
                 
-            with patch('stock_trader.core.summary_trader.send_telegram_message') as mock_send:
+            # 실계좌 조회는 실패한 것으로 두고, DB 폴백 경로의 포맷을 검증
+            with patch('stock_trader.core.summary_trader.send_telegram_message') as mock_send, \
+                 patch('stock_trader.core.summary_trader._fetch_live_account_data', return_value=None):
                 summary_trader.send_daily_summary_to_telegram()
                 
                 # 호출이 한 번 발생했는지 검증

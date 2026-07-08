@@ -93,10 +93,16 @@ def _fetch_live_account_data():
 
             evlt = float(summary.get("tot_evlt_amt", 0) or 0)
             cash = float(summary.get("prsm_dpst_aset_amt", 0) or 0)
+            parsed = reconciler._parse_broker_holdings(summary)
+
+            # 전부 0이면 어댑터의 API 실패 폴백 응답으로 간주 (진짜 빈 계좌도 예수금은 있음)
+            if evlt <= 0 and cash <= 0 and not parsed:
+                print(f"⚠️ [{b_name}] 계좌 응답이 전부 0 — API 실패로 간주하고 스킵")
+                continue
+
             total_assets += evlt + cash
             total_cash += cash
-
-            for ticker, h in reconciler._parse_broker_holdings(summary).items():
+            for ticker, h in parsed.items():
                 holdings.append({"broker": b_name, "ticker": ticker, **h})
             any_success = True
 

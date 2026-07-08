@@ -34,9 +34,10 @@ _REPO = None
 _HYPERPARAMS = {"ts": 0.0, "values": {}}
 HYPERPARAM_DEFAULTS = {
     "HARD_STOP_LOSS": -5.0,
-    "CHANDELIER_ATR_MULT": 1.5,
+    "CHANDELIER_ATR_MULT": 2.5,   # 고전적 Chandelier(3.0)에 가깝게 완화 — 장중 흔들기 휩쏘 방지
     "TRAILING_MIN_DROP": 2.0,
-    "TRAILING_MAX_DROP": 5.0,
+    "TRAILING_MAX_DROP": 8.0,
+    "MAX_CHASE_PCT": 2.0,         # 14:30 이후 마감 집행 시 목표가 대비 추격 허용 폭(%)
 }
 
 def get_repo() -> DbRepository:
@@ -343,10 +344,16 @@ def run_trade():
                 
                 if signals:
                     logger.info(f"🧠 {len(signals)}개의 매매 신호 분석 중...")
-                    
+
                     broker_apis = {}
                     broker_cash = {}
-                    
+                    # 브로커별 미처리 BUY 신호 수 — 예수금 부족 시 남은 신호들과 공평 분할하기 위함
+                    pending_buy_counts = {}
+                    for s in signals:
+                        if s['action'] == 'BUY':
+                            b = s['broker_id'] if s.get('broker_id') else "KIWOOM"
+                            pending_buy_counts[b] = pending_buy_counts.get(b, 0) + 1
+
                     for sig in signals:
                         broker_id = sig['broker_id'] if 'broker_id' in sig.keys() and sig['broker_id'] else "KIWOOM"
                         
@@ -376,6 +383,8 @@ def run_trade():
                         
                         # BUY 주문 시 추가 필터링 및 스마트 주문 집행
                         if sig['action'] == 'BUY':
+                            remaining_buys = max(1, pending_buy_counts.get(broker_id, 1))
+                            pending_buy_counts[broker_id] = remaining_buys - 1
                             if market_halt:
                                 logger.warning(f"⏭️ [매수 보류] {sig['name']}: 시장 서킷 브레이커 작동 중으로 매수 스킵")
                                 continue
@@ -396,16 +405,22 @@ def run_trade():
                                 
                                 # 스마트 매수 집행 판단:
                                 # 1. 타겟가(볼밴 하단) 이하로 내려오는 눌림목일 때 매수진입
-                                # 2. 단, 장 마감 임박(14시 30분 이후)에는 타겟 가격에 도달하지 못했더라도 금일 포트폴리오 구성을 완료하기 위해 즉시 매수 집행
+                                # 2. 장 마감 임박(14시 30분 이후)에는 목표가 미도달이어도 집행하되,
+                                #    추격 허용 폭(MAX_CHASE_PCT) 이내일 때만 — 엣지 없는 고가 추격 매수 방지
                                 if target_price and current_price > 0:
                                     is_target_reached = current_price <= target_price * 1.005 # 0.5% 안전마진 이내
                                     is_late_afternoon = now.hour > 14 or (now.hour == 14 and now.minute >= 30)
-                                    
+
                                     if not is_target_reached and not is_late_afternoon:
                                         logger.info(f"⏳ [눌림목 대기] {sig['name']}: 현재가 {current_price:,.0f}원 > 목표가 {target_price:,.0f}원 (14시 30분 이후 자동체결 대기)")
                                         continue
                                     elif is_late_afternoon and not is_target_reached:
-                                        logger.info(f"⏰ [시간 만료 즉시 집행] {sig['name']}: 14:30 경과로 현재가 {current_price:,.0f}원에 매수 집행 (목표가 {target_price:,.0f}원)")
+                                        max_chase_pct = get_hyperparams()["MAX_CHASE_PCT"]
+                                        chase_pct = (current_price - target_price) / target_price * 100.0
+                                        if chase_pct > max_chase_pct:
+                                            logger.info(f"⛔ [추격 상한 초과] {sig['name']}: 현재가 {current_price:,.0f}원 = 목표가 대비 {chase_pct:+.2f}% (허용 {max_chase_pct:.1f}%) — 매수 보류")
+                                            continue
+                                        logger.info(f"⏰ [마감 임박 집행] {sig['name']}: 목표가 대비 {chase_pct:+.2f}% 추격 허용 범위 내 — 현재가 {current_price:,.0f}원 매수 집행")
                                     else:
                                         logger.info(f"🎯 [목표가 터치 진입] {sig['name']}: 현재가 {current_price:,.0f}원 <= 목표가 {target_price:,.0f}원 만족")
                                 
@@ -413,8 +428,10 @@ def run_trade():
                                 if current_price > 0:
                                     estimated_cost = qty * current_price
                                     if estimated_cost > available_cash:
+                                        # 잔여 예수금을 남은 매수 신호 수로 분할 — 앞 순번이 전부 가져가 뒤 순번이 굶는 것 방지
+                                        fair_cash = available_cash / remaining_buys
                                         old_qty = qty
-                                        qty = int(available_cash * 0.95 / current_price)  # 95% 안전마진
+                                        qty = int(fair_cash * 0.95 / current_price)  # 95% 안전마진
                                         if qty <= 0:
                                             logger.warning(f"⚠️ [{broker_id}] 예수금 부족으로 매수 스킵: {sig['name']} (필요: {estimated_cost:,.0f}원, 예수금: {available_cash:,.0f}원)")
                                             get_repo().cancel_signal(sig['id'], "예수금 부족")

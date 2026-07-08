@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import random
 import json
 import pandas as pd
 import logging
@@ -8,36 +7,30 @@ from logging.handlers import RotatingFileHandler
 import datetime
 import pytz
 from typing import List, Dict
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-from bs4 import BeautifulSoup
-import re
 import time
-from stock_trader.communication.telegram_utils import send_telegram_message
 from stock_trader.data.dart_api import DartAPI
 from stock_trader.data.dart_financial_scorer import DartFinancialScorer
 from stock_trader.data.db_repository import DbRepository
+from stock_trader.data.naver_finance import NaverFinanceProvider
 from stock_trader.communication.ipc_messenger import IpcPublisher
 from stock_trader.broker.broker_factory import BrokerFactory
 import stock_trader.core.indicators as ind
 import stock_trader.core.signals as sig
 import stock_trader.core.reconciler as reconciler
+from stock_trader.core.market_features import compute_technical_features
+from stock_trader.core.scorer import (
+    MultiFactorScorer,
+    apply_sector_momentum,
+    WEIGHT_EARNINGS,
+    WEIGHT_MACRO,
+    WEIGHT_DART_REVENUE,
+    WEIGHT_DART_OP_PROFIT,
+    WEIGHT_DART_HEALTH,
+    WEIGHT_INSTITUTIONAL,
+)
 from stock_trader.core.korean_market_calendar import is_first_trading_day_of_month
 from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, ACTIVE_STRATEGY_PROFILE, STOCK_MULTIFACTOR, ETF_TREND, ETF_UNIVERSE
 LOG_PATH = os.path.join(LOG_DIR, "strategy_engine.log")
-
-# ── 기존 팩터 가중치 (네이버 금융 기반) ──
-WEIGHT_EARNINGS = 0.15       # 기존 EPS 성장률 (네이버 금융)
-WEIGHT_MACRO = 0.20          # 산업 트렌드/매크로
-
-# ── DART 팩터 가중치 (공시 재무제표 기반) ──
-WEIGHT_DART_REVENUE = 0.15   # DART: 매출 성장률
-WEIGHT_DART_OP_PROFIT = 0.20 # DART: 영업이익 성장률
-WEIGHT_DART_HEALTH = 0.05    # DART: 재무건전성 (부채비율/현금흐름)
-WEIGHT_INSTITUTIONAL = 0.25  # 수급(기관/외인) — 대량보유 보너스 포함
-
-# 합계: 0.15 + 0.20 + 0.15 + 0.20 + 0.05 + 0.25 = 1.00
 
 # 로깅 설정 (KST 시간대 적용 및 RotatingFileHandler 파일 회전 적용)
 def kst_converter(*args):
@@ -98,7 +91,8 @@ class StrategyEngine:
                 self.SAMPLE_DATA = SAMPLE_TICKERS
             logger.info(f"💼 [STOCK_MULTIFACTOR] 프로파일 로드됨. 유니버스 크기: {len(self.SAMPLE_DATA)}")
 
-        self._init_session()
+        self.naver = NaverFinanceProvider()
+        self.scorer = MultiFactorScorer()
         self._init_dart()
         self._load_hyperparams()
 
@@ -152,6 +146,7 @@ class StrategyEngine:
             "RSI_SELL_THRES": 70.0,
             "TRAILING_STOP_DROP": 3.0,
             "HARD_STOP_LOSS": -5.0,
+            "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -180,6 +175,7 @@ class StrategyEngine:
         self.RSI_SELL_THRES = params["RSI_SELL_THRES"]
         self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
+        self.BEAR_POSITION_FACTOR = float(params["BEAR_POSITION_FACTOR"])
         
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
@@ -189,30 +185,8 @@ class StrategyEngine:
 
     def _calculate_adx(self, df, period=14):
         try:
-            df = df.copy()
-            df['UpMove'] = df['High'] - df['High'].shift(1)
-            df['DownMove'] = df['Low'].shift(1) - df['Low']
-            
-            df['+DM'] = 0.0
-            df.loc[(df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), '+DM'] = df['UpMove']
-            
-            df['-DM'] = 0.0
-            df.loc[(df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), '-DM'] = df['DownMove']
-            
-            df['H-L'] = df['High'] - df['Low']
-            df['H-Cp'] = (df['High'] - df['Close'].shift(1)).abs()
-            df['L-Cp'] = (df['Low'] - df['Close'].shift(1)).abs()
-            df['TR'] = df[['H-L', 'H-Cp', 'L-Cp']].max(axis=1)
-            
-            df['TR_smooth'] = df['TR'].rolling(window=period).mean()
-            df['+DM_smooth'] = df['+DM'].rolling(window=period).mean()
-            df['-DM_smooth'] = df['-DM'].rolling(window=period).mean()
-            
-            df['+DI'] = 100 * (df['+DM_smooth'] / (df['TR_smooth'] + 1e-9))
-            df['-DI'] = 100 * (df['-DM_smooth'] / (df['TR_smooth'] + 1e-9))
-            df['DX'] = 100 * ((df['+DI'] - df['-DI']).abs() / (df['+DI'] + df['-DI'] + 1e-9))
-            df['ADX'] = df['DX'].rolling(window=period).mean()
-            return float(df['ADX'].iloc[-1]) if not df['ADX'].empty and not pd.isna(df['ADX'].iloc[-1]) else 25.0
+            adx_series = ind.adx(df, period)
+            return float(adx_series.iloc[-1]) if not adx_series.empty and not pd.isna(adx_series.iloc[-1]) else 25.0
         except Exception as e:
             logger.warning(f"ADX 계산 실패 (기본값 25.0 적용): {e}")
             return 25.0
@@ -314,21 +288,6 @@ class StrategyEngine:
             self.dart_api = None
             self.dart_scorer = None
 
-    def _init_session(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        retries = Retry(
-            total=3,
-            backoff_factor=1.0,
-            status_forcelist=[500, 502, 503, 504],
-            raise_on_status=False,
-            allowed_methods=["GET", "POST"]
-        )
-        adapter = HTTPAdapter(max_retries=retries)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
     def fetch_market_data(self) -> List[Dict]:
         logger.info("실제 시장 데이터 수집 시작...")
         sample_data = StrategyEngine.SAMPLE_DATA if StrategyEngine.SAMPLE_DATA else self.SAMPLE_DATA
@@ -400,89 +359,20 @@ class StrategyEngine:
                 except Exception as filter_e:
                     logger.warning(f"⚠️ [{name}] 1차 필터링 검사 실패: {filter_e}")
                 
-                # Naver crawling for fundamental data
-                try:
-                    main_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-                    res = self.session.get(main_url, verify=False, timeout=10)
-                    res.encoding = 'utf-8'
-                    soup = BeautifulSoup(res.text, 'lxml')
-                    
-                    match = re.search(r'업종명\s*:\s*<a[^>]*>([^<]+)</a>', res.text)
-                    if match:
-                        industry_name = match.group(1).strip()
-                    
-                    div = soup.find('div', class_='section cop_analysis')
-                    if div:
-                        table = div.find('table')
-                        if table:
-                            tr_years = table.find_all('tr')[1]
-                            years = [th.get_text(strip=True) for th in tr_years.find_all('th')]
-                            eps_row = None
-                            for tr in table.find_all('tr'):
-                                th_text = tr.find('th')
-                                if th_text and 'EPS(원)' in th_text.get_text(strip=True):
-                                    eps_row = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
-                                    break
-                            if eps_row and len(years) >= 2 and len(eps_row) >= 2:
-                                annual_eps = []
-                                for y, eps in zip(years, eps_row):
-                                    if re.match(r'\d{4}\.\d{2}', y) and '(E)' not in y:
-                                        try:
-                                            annual_eps.append(float(eps) if eps and eps != '-' else 0.0)
-                                        except ValueError:
-                                            pass
-                                if len(annual_eps) >= 2:
-                                    latest_eps = annual_eps[-1]
-                                    prev_eps = annual_eps[-2]
-                                    if prev_eps != 0:
-                                        eps_growth = ((latest_eps - prev_eps) / abs(prev_eps)) * 100
-                    
-                    now_val_div = soup.find('p', class_='no_today')
-                    if now_val_div:
-                        blind_span = now_val_div.find('span', class_='blind')
-                        if blind_span:
-                            current_price = float(blind_span.get_text(strip=True).replace(',', ''))
-                except Exception as e:
-                    logger.error(f"[{name}] 메인 정보 파싱 실패: {e}")
-                    
+                # 네이버 금융 크롤링 (업종명/EPS 성장률/현재가)
+                main_info = self.naver.fetch_main_info(ticker, name)
+                eps_growth = main_info["eps_growth"]
+                industry_name = main_info["industry_name"]
+                current_price = main_info["current_price"]
+
                 # Fallback for current price from local DB hist
                 if current_price == 0.0 and not df_hist.empty:
                     current_price = float(df_hist['Close'].iloc[-1])
                     logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
 
-                try:
-                    frgn_url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
-                    res = self.session.get(frgn_url, verify=False, timeout=10)
-                    res.encoding = 'euc-kr'
-                    soup = BeautifulSoup(res.text, 'lxml')
-                    tables = soup.find_all('table', class_='type2')
-                    target_table = None
-                    for t in tables:
-                        if '기관' in t.get_text() and '외국인' in t.get_text():
-                            target_table = t
-                            break
-                    if target_table:
-                        total_net_buying_krw = 0.0
-                        day_count = 0
-                        for tr in target_table.find_all('tr'):
-                            tds = [td.get_text(strip=True).replace(',', '') for td in tr.find_all('td')]
-                            if len(tds) >= 9 and re.match(r'\d{4}\.\d{2}\.\d{2}', tds[0]):
-                                try:
-                                    price_val = float(tds[1])
-                                    if current_price == 0.0 and day_count == 0:
-                                        current_price = price_val
-                                    inst_vol = float(tds[5]) if tds[5] and tds[5] != '-' else 0.0
-                                    foreign_vol = float(tds[6]) if tds[6] and tds[6] != '-' else 0.0
-                                    total_net_buying_krw += (inst_vol + foreign_vol) * price_val
-                                    day_count += 1
-                                    if day_count >= 5:
-                                        break
-                                except ValueError:
-                                    pass
-                        net_buying = total_net_buying_krw / 100000000.0
-                except Exception as e:
-                    logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
-                    
+                # 네이버 금융 크롤링 (기관/외국인 수급)
+                net_buying, current_price = self.naver.fetch_investor_net_buying(ticker, name, current_price)
+
                 if self.dart_scorer:
                     try:
                         fin_score = self.dart_scorer.get_financial_score(ticker)
@@ -501,91 +391,15 @@ class StrategyEngine:
                 if not df_hist.empty:
                     current_price = float(df_hist['Close'].iloc[-1])
             
-            rsi_val = 50.0
-            lower_band = 0.0
-            upper_band = 0.0
-            is_bottoming = True
-            relative_momentum = 0.0
-            atr_pct = 3.0
-            
-            is_aligned = False
-            is_under_ma120 = False
-            is_vcp = False
-            return_5d = 0.0
-            
-            try:
-                if not df_hist.empty and len(df_hist) >= 20:
-                    closes = df_hist['Close']
-                    
-                    # 1. RSI 계산
-                    delta = closes.diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                    rs = gain / (loss + 1e-9)
-                    rsi_series = 100 - (100 / (1 + rs))
-                    rsi_val = float(rsi_series.iloc[-1])
-                    
-                    # 2. 볼린저 밴드
-                    ma20 = closes.rolling(window=20).mean()
-                    std20 = closes.rolling(window=20).std()
-                    lower_band = float((ma20 - self.BB_STD * std20).iloc[-1])
-                    upper_band = float((ma20 + self.BB_STD * std20).iloc[-1])
-                    
-                    # 3. MACD 필터 (떨어지는 칼날 방지)
-                    ema12 = closes.ewm(span=12, adjust=False).mean()
-                    ema26 = closes.ewm(span=26, adjust=False).mean()
-                    macd = ema12 - ema26
-                    signal = macd.ewm(span=9, adjust=False).mean()
-                    macd_hist = macd - signal
-                    
-                    if len(macd_hist) >= 2:
-                        is_bottoming = (macd_hist.iloc[-1] > macd_hist.iloc[-2]) or (macd.iloc[-1] > signal.iloc[-1])
-                    else:
-                        is_bottoming = True
-                        
-                    # 4. 상대 모멘텀 계산 (90일 수익률 비교)
-                    if len(closes) >= 60:
-                        stock_return_90d = ((closes.iloc[-1] - float(closes.iloc[-60])) / float(closes.iloc[-60])) * 100
-                        relative_momentum = stock_return_90d - getattr(self, 'kospi_return_90d', 0.0)
-                    else:
-                        relative_momentum = 0.0
-                        
-                    # 5. ATR 변동성 계산 (14일 기준)
-                    highs = df_hist['High']
-                    lows = df_hist['Low']
-                    tr = pd.concat([highs - lows, (highs - closes.shift(1)).abs(), (lows - closes.shift(1)).abs()], axis=1).max(axis=1)
-                    atr_val = tr.rolling(window=14).mean().iloc[-1]
-                    atr_pct = (atr_val / closes.iloc[-1]) * 100 if closes.iloc[-1] > 0 else 3.0
-                    
-                    # 6. 이동평균선 정배열/역배열
-                    df_hist['MA20'] = closes.rolling(window=20).mean()
-                    df_hist['MA60'] = closes.rolling(window=60).mean()
-                    df_hist['MA120'] = closes.rolling(window=120).mean()
-                    
-                    if len(closes) >= 120:
-                        ma20_val = df_hist['MA20'].iloc[-1]
-                        ma60_val = df_hist['MA60'].iloc[-1]
-                        ma120_val = df_hist['MA120'].iloc[-1]
-                        is_aligned = (ma20_val > ma60_val) and (ma60_val > ma120_val)
-                        is_under_ma120 = current_price < ma120_val
-                    
-                    # 7. VCP (거래량 급감 필터)
-                    df_hist['Vol_MA20'] = df_hist['Volume'].rolling(window=20).mean()
-                    if len(closes) >= 20:
-                        avg_vol20 = df_hist['Vol_MA20'].iloc[-1]
-                        today_vol = df_hist['Volume'].iloc[-1]
-                        if (current_price <= lower_band * 1.01) and (today_vol < 0.6 * avg_vol20):
-                            is_vcp = True
-                            
-                    # 8. 5일 수익률 (섹터 모멘텀용)
-                    if len(closes) >= 6:
-                        return_5d = ((closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6]) * 100
-                    else:
-                        return_5d = 0.0
-                        
-            except Exception as tech_e:
-                logger.warning(f"[{name}] 기술 지표 계산 실패: {tech_e}")
- 
+            # 기술 지표 피처 계산 (indicators.py 순수 함수 재사용)
+            features = compute_technical_features(
+                df_hist,
+                current_price=current_price,
+                bb_std=self.BB_STD,
+                kospi_return_90d=getattr(self, 'kospi_return_90d', 0.0),
+                name=name
+            )
+
             real_stocks.append({
                 "ticker": ticker,
                 "name": name,
@@ -600,106 +414,19 @@ class StrategyEngine:
                 "dart_dividend_yield": dart_dividend_yield,
                 "dart_major_shareholder_bonus": dart_major_shareholder_bonus,
                 "dart_available": dart_available,
-                "rsi": rsi_val,
-                "lower_band": lower_band,
-                "upper_band": upper_band,
-                "is_bottoming": is_bottoming,
-                "relative_momentum": relative_momentum,
-                "atr_pct": atr_pct,
-                "is_aligned": is_aligned,
-                "is_under_ma120": is_under_ma120,
-                "is_vcp": is_vcp,
-                "return_5d": return_5d,
+                **features,
                 "industry_score": 50.0
             })
             time.sleep(0.1)
-            
-        # 주간(5일) 섹터 모멘텀 계산
-        try:
-            industry_groups = {}
-            for s in real_stocks:
-                ind_name = s["industry_name"]
-                if ind_name not in industry_groups:
-                    industry_groups[ind_name] = []
-                industry_groups[ind_name].append(s["return_5d"])
-                
-            industry_momentum = {}
-            for ind_name, returns in industry_groups.items():
-                industry_momentum[ind_name] = sum(returns) / len(returns)
-                
-            for s in real_stocks:
-                ind_name = s["industry_name"]
-                avg_ret_5d = industry_momentum.get(ind_name, 0.0)
-                score = 57.5 + avg_ret_5d * 5.0
-                s["industry_score"] = max(20.0, min(95.0, score))
-                logger.info(f"📂 [{s['name']}] 업종: {ind_name} | 5일 섹터 모멘텀: {avg_ret_5d:+.2f}% | 업종 점수: {s['industry_score']:.1f}")
-        except Exception as sec_e:
-            logger.error(f"주간 섹터 모멘텀 계산 오류: {sec_e}")
-            
+
+        # 주간(5일) 섹터 모멘텀 계산 → industry_score 갱신
+        apply_sector_momentum(real_stocks)
+
         return real_stocks
 
     def calculate_scores(self, stocks: List[Dict]) -> List[Dict]:
-        if not stocks: return []
-        eps_values = [s["eps_growth"] for s in stocks]
-        net_values = [s["net_buying"] for s in stocks]
-        rev_values = [s.get("dart_revenue_growth", 0.0) for s in stocks]
-        op_values = [s.get("dart_op_growth", 0.0) for s in stocks]
-        
-        min_eps, max_eps = min(eps_values), max(eps_values)
-        min_net, max_net = min(net_values), max(net_values)
-        min_rev, max_rev = min(rev_values), max(rev_values)
-        min_op, max_op = min(op_values), max(op_values)
-        
-        eps_range = max_eps - min_eps if max_eps != min_eps else 1.0
-        net_range = max_net - min_net if max_net != min_net else 1.0
-        rev_range = max_rev - min_rev if max_rev != min_rev else 1.0
-        op_range = max_op - min_op if max_op != min_op else 1.0
-        
-        for stock in stocks:
-            s_eps = ((stock["eps_growth"] - min_eps) / eps_range) * 100
-            s_macro = stock["industry_score"]
-            s_rev = ((stock.get("dart_revenue_growth", 0.0) - min_rev) / rev_range) * 100
-            s_op = ((stock.get("dart_op_growth", 0.0) - min_op) / op_range) * 100
-            debt_score = max(0, 100 - stock.get("dart_debt_ratio", 100.0))
-            health_score = (debt_score * 0.5 + stock.get("dart_cf_quality", 50.0) * 0.5)
-            s_net = ((stock["net_buying"] - min_net) / net_range) * 100
-            
-            final_score = (
-                s_eps * WEIGHT_EARNINGS +
-                s_macro * WEIGHT_MACRO +
-                s_rev * WEIGHT_DART_REVENUE +
-                s_op * WEIGHT_DART_OP_PROFIT +
-                health_score * WEIGHT_DART_HEALTH +
-                s_net * WEIGHT_INSTITUTIONAL
-            )
-            
-            final_score += stock.get("dart_major_shareholder_bonus", 0.0)
-            div_yield = stock.get("dart_dividend_yield", 0.0)
-            if div_yield >= 3.0:
-                final_score += min(8.0, div_yield * 2.0)
-            if stock.get("dart_debt_ratio", 100.0) > 200:
-                final_score -= 10.0
-                
-            # 상대 모멘텀(Relative Strength) 보너스 반영 (최대 10점)
-            rel_mom = stock.get("relative_momentum", 0.0)
-            if rel_mom > 0:
-                final_score += min(10.0, rel_mom * 0.1)
-                
-            # 120일 이평선 하회(장기 역배열) 감점
-            if stock.get("is_under_ma120", False):
-                final_score -= 15.0
-            # 20-60-120일 정배열 가점
-            elif stock.get("is_aligned", False):
-                final_score += 5.0
-                
-            # BB 하단 부근 거래량 급감 (VCP) 가점
-            if stock.get("is_vcp", False):
-                final_score += 10.0
-                logger.info(f"✨ [{stock['name']}] BB 하단 거래량 급감 (VCP 패턴) 포착! 가점 10점 부여")
-            
-            stock["total_score"] = round(final_score, 2)
-        
-        return sorted(stocks, key=lambda x: x["total_score"], reverse=True)
+        """멀티팩터 스코어링 (core/scorer.py의 MultiFactorScorer에 위임)"""
+        return self.scorer.calculate_scores(stocks)
 
     def fetch_current_holdings(self) -> List[Dict]:
         """활성화된 모든 증권사 API 또는 DB를 통해 현재 보유 종목 및 수익률 가져오기 (max_profit_rate 동적 추적 및 업데이트)"""
@@ -1400,7 +1127,16 @@ class StrategyEngine:
                         f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | 국면: {regime_now})"
                     )
                     continue
-                    
+
+                # BEAR 국면 방어: 역추세 매수 비중 축소 (추세추종은 위에서 이미 BULL/SIDEWAY 한정)
+                if regime_now.startswith("BEAR"):
+                    bear_factor = getattr(self, 'BEAR_POSITION_FACTOR', 0.5)
+                    if bear_factor <= 0.0:
+                        logger.info(f"⏭️ [{b_name}] {name}: BEAR 국면 신규 매수 전면 중지 (BEAR_POSITION_FACTOR=0)")
+                        continue
+                    weight_multiplier *= bear_factor
+                    logger.info(f"🛡️ [{b_name}] {name}: BEAR 국면 매수 비중 {bear_factor:.0%}로 축소 적용")
+
                 if price > 0 and remaining_cash > 0:
                     score_ratio = (score / total_score_sum) * len(top_5)
                     size_factor = max(0.5, min(1.5, 3.0 / atr_pct)) * weight_multiplier

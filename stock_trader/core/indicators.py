@@ -40,3 +40,29 @@ def drawdown_from_peak(series: pd.Series) -> pd.Series:
     """Calculates drawdown from peak in percent."""
     cum_max = series.cummax()
     return ((series - cum_max) / (cum_max + 1e-9)) * 100
+
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """df must contain 'High', 'Low', 'Close' columns. Returns ADX Series."""
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    plus_dm = pd.Series(0.0, index=df.index)
+    plus_dm[(up_move > down_move) & (up_move > 0)] = up_move
+
+    minus_dm = pd.Series(0.0, index=df.index)
+    minus_dm[(down_move > up_move) & (down_move > 0)] = down_move
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    tr_smooth = tr.rolling(window=period).mean()
+    plus_di = 100 * (plus_dm.rolling(window=period).mean() / (tr_smooth + 1e-9))
+    minus_di = 100 * (minus_dm.rolling(window=period).mean() / (tr_smooth + 1e-9))
+    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9))
+    return dx.rolling(window=period).mean()

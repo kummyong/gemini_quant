@@ -121,6 +121,26 @@ def reconcile(broker_id: str, broker, repo, notify: bool = True) -> Dict[str, An
         return result
 
     broker_holdings = _parse_broker_holdings(account_summary)
+
+    # 안전장치: 응답에 총자산·예수금 필드가 있는데 모두 0이고 보유 내역도 없으면
+    # 어댑터의 API 실패 폴백 응답(전부 "0"으로 채운 딕셔너리)일 가능성이 높다.
+    # 진짜 빈 계좌라도 예수금은 0보다 크므로 정상적인 계좌 리셋 감지와 구분된다.
+    # 이 응답으로 대사를 진행하면 리셋 감지 로직이 정상 포지션을 전량 삭제할 수 있어 중단한다.
+    if not broker_holdings and "prsm_dpst_aset_amt" in account_summary:
+        try:
+            _cash = float(account_summary.get("prsm_dpst_aset_amt", 0) or 0)
+            _evlt = float(account_summary.get("tot_evlt_amt", 0) or 0)
+        except (TypeError, ValueError):
+            _cash = _evlt = 0.0
+        if _cash <= 0 and _evlt <= 0:
+            result["error"] = "suspicious all-zero account response"
+            _notify(
+                f"❌ [Reconciler][{broker_id}] 계좌 응답이 전부 0(보유·예수금·평가금)이라 "
+                f"API 실패 응답으로 간주하고 포지션 대사를 중단합니다 (DB 포지션 보존).",
+                notify,
+            )
+            return result
+
     db_holdings = {row["stk_cd"]: row for row in db_rows if row.get("broker_id") == broker_id}
 
     # 시나리오 d) 계좌 리셋 감지: 계좌는 완전히 비어있는데 DB에 다수 포지션이 남아있음
