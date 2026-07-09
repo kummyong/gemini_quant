@@ -145,6 +145,78 @@ def test_bear_regime_uses_stricter_threshold_and_reduced_size():
     assert rsi_b == cfg.bull_rsi
 
 
+def test_replacement_discipline_gates():
+    """min_holding_days / replacement_grace_days가 교체 매도를 게이트해야 한다.
+    리스크 청산이 아닌 replacement에만 적용된다."""
+    from stock_trader.core.backtest_multifactor import Position
+
+    kospi = make_kospi_bull()
+    stock = make_ohlcv([10000.0] * 260)
+    cfg = default_config()
+    cfg.min_holding_days = 5
+    cfg.replacement_grace_days = 3
+    bt = MultiFactorBacktester(cfg, {"AAAAAA": stock}, kospi, {"AAAAAA": "테스트A"})
+    t = DATES[200]
+    feats = {"AAAAAA": {"rsi": 50.0, "upper_band": 999_999_999.0, "atr_pct": 3.0}}
+
+    # 보유 2일차 + 순위 이탈 1일째 → 두 조건 모두 미충족, 교체 금지
+    bt.positions["AAAAAA"] = Position(
+        ticker="AAAAAA", name="테스트A", quantity=10, avg_price=10000.0,
+        entry_date=t - pd.Timedelta(days=2), signal_date=t - pd.Timedelta(days=3),
+        signal_type="역추세")
+    bt.out_of_top_streak["AAAAAA"] = 0
+    exits = bt._generate_exits(t, feats, top_tickers=[])
+    assert exits == [], "최소 보유일/유예 미충족 시 교체 매도가 발생하면 안 됨"
+
+    # 보유 10일차 + 이탈 streak 3 충족 → 교체 발동
+    bt.positions["AAAAAA"].entry_date = t - pd.Timedelta(days=10)
+    bt.out_of_top_streak["AAAAAA"] = 2  # _generate_exits에서 +1 → 3
+    exits = bt._generate_exits(t, feats, top_tickers=[])
+    assert len(exits) == 1 and exits[0].reason == "replacement"
+
+    # 순위 복귀 시 streak 리셋 확인
+    bt.out_of_top_streak["AAAAAA"] = 2
+    bt._generate_exits(t, feats, top_tickers=["AAAAAA"])
+    assert bt.out_of_top_streak["AAAAAA"] == 0
+
+
+def test_overshoot_partial_exit_creates_runner():
+    """overshoot_exit_fraction < 1.0이면 오버슈팅 시 부분 익절 후 잔여 물량이
+    러너로 전환되고, 러너에는 오버슈팅이 재발동하지 않아야 한다."""
+    from stock_trader.core.backtest_multifactor import Position
+
+    kospi = make_kospi_bull()
+    stock = make_ohlcv([12000.0] * 260)
+    cfg = default_config()
+    cfg.overshoot_exit_fraction = 0.5
+    bt = MultiFactorBacktester(cfg, {"AAAAAA": stock}, kospi, {"AAAAAA": "테스트A"})
+    t = DATES[200]
+    bt.positions["AAAAAA"] = Position(
+        ticker="AAAAAA", name="테스트A", quantity=10, avg_price=10000.0,
+        entry_date=t - pd.Timedelta(days=10), signal_date=t - pd.Timedelta(days=11),
+        signal_type="역추세")
+    feats = {"AAAAAA": {"rsi": 75.0, "upper_band": 0.0, "atr_pct": 3.0}}
+
+    # 오버슈팅(RSI 75) → 절반(5주)만 익절 주문, 러너 마킹
+    exits = bt._generate_exits(t, feats, top_tickers=["AAAAAA"])
+    assert len(exits) == 1
+    assert exits[0].quantity == 5
+    assert exits[0].reason == "overshooting_partial"
+    assert bt.positions["AAAAAA"].runner is True
+
+    # 체결 후 잔여 5주 유지 + 트레이드 기록은 부분 물량
+    bt.pending_orders = exits
+    t2 = DATES[201]
+    bt._execute_pending(t2)
+    assert bt.positions["AAAAAA"].quantity == 5
+    assert bt.trades[-1]["quantity"] == 5
+    assert bt.trades[-1]["exit_reason"] == "overshooting_partial"
+
+    # 러너에는 오버슈팅 재발동 없음 (트레일링/하드스탑만 적용)
+    exits = bt._generate_exits(t2, feats, top_tickers=["AAAAAA"])
+    assert exits == []
+
+
 def test_deterministic_rerun():
     """동일 입력으로 두 번 실행하면 결과가 완전히 같아야 한다 (상태 누수 방지)."""
     kospi = make_kospi_bull()

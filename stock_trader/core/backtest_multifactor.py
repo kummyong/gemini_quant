@@ -62,6 +62,15 @@ class BacktestConfig:
     tf_rsi_max: float = 65.0
     tf_rel_momentum_min: float = 3.0      # 상대강도(vs KOSPI 90일) 최소 %
 
+    # 교체 매도 규율 (리스크 청산에는 미적용, replacement에만 적용)
+    min_holding_days: int = 5             # 교체 매도 전 최소 보유 달력일 (라이브 현행: MIN_HOLDING_DAYS=5)
+    replacement_grace_days: int = 0       # 순위(top_n) 연속 이탈 유예 거래일 (0 = 라이브 현행: 미사용)
+
+    # 러너 관리: 오버슈팅 익절 시 매도 비율 (1.0 = 전량 익절, 라이브 현행)
+    # 1.0 미만이면 해당 비율만 익절하고 잔여 물량은 러너로 전환되어
+    # 트레일링/하드스탑으로만 청산된다 (오버슈팅 재발동 없음).
+    overshoot_exit_fraction: float = 1.0
+
     # 체결 모델 (auto_trader 근사)
     target_touch_margin: float = 0.005    # 목표가 터치 인정 마진 (0.5%)
     max_chase_pct: float = 2.0            # 마감 임박 추격 허용 폭 %
@@ -90,6 +99,7 @@ class Position:
     signal_date: pd.Timestamp
     signal_type: str
     max_profit_rate: float = 0.0
+    runner: bool = False   # 부분 익절 후 잔여 물량 (오버슈팅 재발동 제외)
 
 
 @dataclass
@@ -123,6 +133,7 @@ class MultiFactorBacktester:
         self.cash = config.initial_cash
         self.reserved_cash = 0.0            # 미체결 매수 주문 예약분
         self.positions: Dict[str, Position] = {}
+        self.out_of_top_streak: Dict[str, int] = {}  # 보유 종목의 top_n 연속 이탈 거래일 수
         self.pending_orders: List[Order] = []
         self.lockout_since: Optional[pd.Timestamp] = None
         self.trades: List[dict] = []
@@ -173,8 +184,9 @@ class MultiFactorBacktester:
                 pos = self.positions.get(order.ticker)
                 if pos is None:
                     continue
+                sell_qty = min(order.quantity, pos.quantity)
                 fill_price = float(bar['Open']) * (1 - cfg.slippage)
-                proceeds = pos.quantity * fill_price * (1 - cfg.fee_sell)
+                proceeds = sell_qty * fill_price * (1 - cfg.fee_sell)
                 self.cash += proceeds
                 ret_pct = (fill_price - pos.avg_price) / pos.avg_price * 100
                 self.trades.append({
@@ -183,14 +195,18 @@ class MultiFactorBacktester:
                     "entry_signal_date": pos.signal_date,
                     "exit_signal_date": order.signal_date,
                     "entry_price": pos.avg_price, "exit_price": fill_price,
-                    "quantity": pos.quantity,
+                    "quantity": sell_qty,
                     "return_pct": round(ret_pct, 3),
-                    "pnl": round(proceeds - pos.quantity * pos.avg_price, 0),
+                    "pnl": round(proceeds - sell_qty * pos.avg_price, 0),
                     "holding_days": int((t - pos.entry_date).days),
                     "signal_type": pos.signal_type,
                     "exit_reason": order.reason
                 })
-                del self.positions[order.ticker]
+                if sell_qty >= pos.quantity:
+                    del self.positions[order.ticker]
+                    self.out_of_top_streak.pop(order.ticker, None)
+                else:
+                    pos.quantity -= sell_qty  # 부분 익절 → 잔여 물량 유지 (러너)
                 continue
 
             # BUY: 눌림목 목표가 터치 / 추격 상한 근사 (auto_trader 스마트 집행)
@@ -226,6 +242,7 @@ class MultiFactorBacktester:
                 entry_date=t, signal_date=order.signal_date,
                 signal_type=order.signal_type
             )
+            self.out_of_top_streak[order.ticker] = 0
         self.pending_orders = still_pending
 
     # ── 청산 신호 (generate_management_signals 주식 경로 복제) ─────────────
@@ -261,6 +278,13 @@ class MultiFactorBacktester:
                 return exits
 
         # 2) 개별 청산
+        for tic in self.positions:
+            # 교체 규율용: top_n 연속 이탈 거래일 추적
+            if tic not in top_tickers:
+                self.out_of_top_streak[tic] = self.out_of_top_streak.get(tic, 0) + 1
+            else:
+                self.out_of_top_streak[tic] = 0
+
         for tic, pos in self.positions.items():
             df = self.data.get(tic)
             if df is None or t not in df.index:
@@ -281,14 +305,26 @@ class MultiFactorBacktester:
                 reason = "hard_stop"
             elif pos.max_profit_rate >= 2.0 and (pos.max_profit_rate - profit) >= dynamic_trailing_stop:
                 reason = "trailing_stop"
-            elif rsi_val >= cfg.rsi_sell_thres or close >= upper_band:
+            elif (rsi_val >= cfg.rsi_sell_thres or close >= upper_band) and not pos.runner:
                 reason = "overshooting"
             elif tic not in top_tickers and profit < 2.0:
-                reason = "replacement"
+                # 교체 규율: 최소 보유일 경과 + 순위 연속 이탈 유예 충족 시에만 교체
+                holding_days = (t - pos.entry_date).days
+                if (holding_days >= cfg.min_holding_days
+                        and self.out_of_top_streak.get(tic, 0) >= cfg.replacement_grace_days):
+                    reason = "replacement"
 
             if reason:
+                sell_qty = pos.quantity
+                if reason == "overshooting" and cfg.overshoot_exit_fraction < 1.0:
+                    part_qty = int(pos.quantity * cfg.overshoot_exit_fraction)
+                    if 0 < part_qty < pos.quantity:
+                        # 부분 익절 후 잔여 물량은 러너로 전환 (트레일링/하드스탑으로만 청산)
+                        pos.runner = True
+                        sell_qty = part_qty
+                        reason = "overshooting_partial"
                 exits.append(Order(side="SELL", ticker=tic, name=pos.name,
-                                   quantity=pos.quantity, signal_date=t, reason=reason))
+                                   quantity=sell_qty, signal_date=t, reason=reason))
         return exits
 
     # ── 매수 신호 (_generate_stock_buy_signals 복제) ───────────────────────
