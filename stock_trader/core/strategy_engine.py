@@ -10,7 +10,7 @@ from typing import List, Dict
 import time
 from stock_trader.data.dart_api import DartAPI
 from stock_trader.data.dart_financial_scorer import DartFinancialScorer
-from stock_trader.data.db_repository import DbRepository
+from stock_trader.data.db_repository import DbRepository, HARD_STOP_LOCKOUT_PREFIX, is_hard_stop_lockout
 from stock_trader.data.naver_finance import NaverFinanceProvider
 from stock_trader.communication.ipc_messenger import IpcPublisher
 from stock_trader.broker.broker_factory import BrokerFactory
@@ -147,6 +147,7 @@ class StrategyEngine:
             "TRAILING_STOP_DROP": 3.0,
             "HARD_STOP_LOSS": -5.0,
             "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
+            "HARD_STOP_COOLDOWN_DAYS": 5.0,  # 글로벌 하드스탑 락아웃 최소 유지 일수 (해제에는 BULL 국면도 필요)
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -176,7 +177,8 @@ class StrategyEngine:
         self.TRAILING_STOP_DROP = params["TRAILING_STOP_DROP"]
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
         self.BEAR_POSITION_FACTOR = float(params["BEAR_POSITION_FACTOR"])
-        
+        self.HARD_STOP_COOLDOWN_DAYS = int(params["HARD_STOP_COOLDOWN_DAYS"])
+
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
         self.ETF_TREND_SMA_PERIOD = int(params["ETF_TREND_SMA_PERIOD"])
@@ -476,41 +478,42 @@ class StrategyEngine:
                 except Exception as db_e:
                     logger.error(f"{b_name} 로컬 DB 로드 실패: {db_e}")
 
-            # Sync with DB only when API fails; if API succeeds we trust its data for this run.
-            if not api_success:
-                try:
-                    if self.repo:
-                        db_all = self.repo.get_portfolio_holdings()
-                        for stock in b_holdings:
-                            ticker = stock["ticker"]
-                            current_profit = stock["profit_rate"]
-                            
-                            stored_max_profit = 0.0
-                            for row in db_all:
-                                if row.get("broker_id") == b_name and row["stk_cd"] == ticker:
-                                    stored_max_profit = float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
-                                    break
-                            
-                            if current_profit > stored_max_profit:
-                                new_max_profit = current_profit
-                                logger.info(f"📈 [{b_name}][{stock['name']}] 고점 수익률 갱신: {stored_max_profit:.2f}% -> {new_max_profit:.2f}%")
-                            else:
-                                new_max_profit = stored_max_profit
-                            
-                            stock["max_profit_rate"] = new_max_profit
-                            
-                            self.repo.update_portfolio_holding(
-                                stk_cd=ticker,
-                                stk_nm=stock["name"],
-                                rmnd_qty=stock["quantity"],
-                                pur_pric=stock.get("purchase_price", 0.0),
-                                cur_prc=stock.get("current_price", 0.0),
-                                prft_rt=current_profit,
-                                max_profit_rate=new_max_profit,
-                                broker_id=b_name
-                            )
-                except Exception as db_e:
-                    logger.error(f"{b_name} 보유 종목 DB 동기화/갱신 중 오류 발생: {db_e}")
+            # 고점 수익률(max_profit_rate) 병합/갱신 — API 성공 경로에서도 반드시 수행.
+            # API 응답에는 max_profit_rate가 없으므로 DB의 고수위(high-water mark)를 병합하지 않으면
+            # 트레일링 스탑과 ETF 샹들리에 스탑(peak_close)이 매입가 기준으로 퇴화한다.
+            try:
+                if self.repo:
+                    db_all = self.repo.get_portfolio_holdings()
+                    for stock in b_holdings:
+                        ticker = stock["ticker"]
+                        current_profit = stock["profit_rate"]
+
+                        stored_max_profit = 0.0
+                        for row in db_all:
+                            if row.get("broker_id") == b_name and row["stk_cd"] == ticker:
+                                stored_max_profit = float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
+                                break
+
+                        if current_profit > stored_max_profit:
+                            new_max_profit = current_profit
+                            logger.info(f"📈 [{b_name}][{stock['name']}] 고점 수익률 갱신: {stored_max_profit:.2f}% -> {new_max_profit:.2f}%")
+                        else:
+                            new_max_profit = stored_max_profit
+
+                        stock["max_profit_rate"] = new_max_profit
+
+                        self.repo.update_portfolio_holding(
+                            stk_cd=ticker,
+                            stk_nm=stock["name"],
+                            rmnd_qty=stock["quantity"],
+                            pur_pric=stock.get("purchase_price", 0.0),
+                            cur_prc=stock.get("current_price", 0.0),
+                            prft_rt=current_profit,
+                            max_profit_rate=new_max_profit,
+                            broker_id=b_name
+                        )
+            except Exception as db_e:
+                logger.error(f"{b_name} 보유 종목 DB 동기화/갱신 중 오류 발생: {db_e}")
 
             holdings.extend(b_holdings)
         return holdings
@@ -574,12 +577,20 @@ class StrategyEngine:
             total_purchase_amt += stock.get("purchase_price", 0.0) * qty
             total_eval_amt += stock.get("current_price", 0.0) * qty
             
+        # 글로벌 하드스탑: 미실현 손익을 계좌 전체(현금 포함) 총자산 대비 %로 평가한다.
+        # 과거 보유분 매입금 대비 기준은 현금 비중이 높을 때 소수 포지션의 손실만으로
+        # 전량 청산+락아웃이 발동하는 과민 문제가 있었다 (backtest_multifactor A/B 검증:
+        # 기준 변경만으로 강제 청산 18회 -> 0회, Sharpe 0.36 -> 0.43).
+        # 계좌 총자산을 알 수 없으면 기존(보유분 매입금) 기준으로 보수적으로 폴백한다.
         total_portfolio_profit_rate = 0.0
         if total_purchase_amt > 0:
-            total_portfolio_profit_rate = ((total_eval_amt - total_purchase_amt) / total_purchase_amt) * 100
-            
+            unrealized_pnl = total_eval_amt - total_purchase_amt
+            account_equity = sum(self.BROKER_EQUITY.values()) if self.BROKER_EQUITY else 0.0
+            basis_amt = account_equity if account_equity > 0 else total_purchase_amt
+            total_portfolio_profit_rate = (unrealized_pnl / basis_amt) * 100
+
         if total_purchase_amt > 0 and total_portfolio_profit_rate <= self.HARD_STOP_LOSS:
-            logger.critical(f"🚨 [글로벌 리스크] 계좌 전체 손실 한도 도달! (전체 수익률: {total_portfolio_profit_rate:.2f}%). 전량 청산(Hard Stop)을 단행합니다.")
+            logger.critical(f"🚨 [글로벌 리스크] 계좌 전체 손실 한도 도달! (미실현 손익/총자산: {total_portfolio_profit_rate:.2f}%). 전량 청산(Hard Stop)을 단행합니다.")
             for stock in current_holdings:
                 ticker = stock["ticker"]
                 s_data = market_map.get(ticker, {})
@@ -607,7 +618,11 @@ class StrategyEngine:
             except Exception as tg_e:
                 logger.warning(f"글로벌 손절 IPC 알림 전송 실패: {tg_e}")
             if self.repo:
-                self.repo.update_market_lockout(active=True, since=datetime.datetime.now().strftime("%Y-%m-%d"), reason=f"글로벌 Hard Stop 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%)")
+                self.repo.update_market_lockout(
+                    active=True,
+                    since=datetime.datetime.now().strftime("%Y-%m-%d"),
+                    reason=f"{HARD_STOP_LOCKOUT_PREFIX} 글로벌 Hard Stop 작동 (전체 수익률: {total_portfolio_profit_rate:.2f}%)"
+                )
             return sell_signals
 
         if self.profile == ETF_TREND:
@@ -967,8 +982,13 @@ class StrategyEngine:
                 logger.error(f"KODEX 200 데이터 로드 실패: {e}")
             lockout_active = sig.market_lockout(kodex_df, lockout_state, sig_params)
             if lockout_state.get("active") and not lockout_active:
-                logger.info("🔓 시장 락아웃 해제 조건 충족 (KODEX 200 종가 > SMA50). 락아웃을 비활성화합니다.")
-                self.repo.update_market_lockout(active=False)
+                if is_hard_stop_lockout(lockout_state) and not self._hard_stop_cooldown_elapsed(lockout_state):
+                    # 글로벌 하드스탑 락아웃은 추세 회복(SMA50)만으로 해제하지 않고 최소 쿨다운을 요구
+                    lockout_active = True
+                    logger.warning(f"🚨 글로벌 하드스탑 락아웃 쿨다운 미경과 — 지수 회복에도 락아웃을 유지합니다 (시작일: {lockout_state.get('since')})")
+                else:
+                    logger.info("🔓 시장 락아웃 해제 조건 충족 (KODEX 200 종가 > SMA50). 락아웃을 비활성화합니다.")
+                    self.repo.update_market_lockout(active=False)
 
         if getattr(self, 'is_system_locked', False) or lockout_active:
             logger.warning(f"🚨 [ETF 매수 중단] 시스템 락 또는 시장 락아웃 상태입니다. (system_locked={self.is_system_locked}, lockout={lockout_active})")
@@ -1067,8 +1087,48 @@ class StrategyEngine:
                             logger.error(f"[{ticker}] 쿨다운 기록 해제 실패: {clear_e}")
         return buy_signals
 
+    def _check_hard_stop_lockout(self) -> bool:
+        """글로벌 하드스탑 락아웃 상태를 확인합니다. True면 신규 매수 금지.
+
+        해제 조건: 락아웃 시작 후 HARD_STOP_COOLDOWN_DAYS 경과 AND 시장 국면이 BULL(코스피 > 50일선).
+        장중 지수 급락 서킷 브레이커와 달리 지수의 단순 회복만으로는 해제되지 않는다."""
+        if not self.repo:
+            return False
+        try:
+            state = self.repo.get_market_lockout()
+        except Exception as e:
+            logger.error(f"❌ 락아웃 상태 조회 실패 (안전을 위해 매수 차단): {e}")
+            return True
+        if not is_hard_stop_lockout(state):
+            return False
+
+        regime = getattr(self, 'current_regime', '')
+        if self._hard_stop_cooldown_elapsed(state) and regime == "BULL":
+            self.repo.update_market_lockout(active=False)
+            logger.info(f"🔓 글로벌 하드스탑 락아웃 해제 (쿨다운 {getattr(self, 'HARD_STOP_COOLDOWN_DAYS', 5)}일 경과 + BULL 국면)")
+            return False
+
+        logger.warning(
+            f"🚨 글로벌 하드스탑 락아웃 활성 — 신규 매수를 중지합니다 "
+            f"(시작일: {state.get('since')}, 해제 조건: {getattr(self, 'HARD_STOP_COOLDOWN_DAYS', 5)}일 경과 + BULL 국면, 현재 국면: {regime or 'UNKNOWN'})"
+        )
+        return True
+
+    def _hard_stop_cooldown_elapsed(self, state: Dict) -> bool:
+        """하드스탑 락아웃 시작일로부터 HARD_STOP_COOLDOWN_DAYS 경과 여부 (시작일 파싱 실패 시 미경과 처리)"""
+        since_str = str(state.get("since") or "")[:10]
+        try:
+            since_date = datetime.datetime.strptime(since_str, "%Y-%m-%d").date()
+        except ValueError:
+            logger.warning(f"⚠️ 하드스탑 락아웃 시작일 파싱 실패: '{since_str}' (락아웃 유지)")
+            return False
+        days_elapsed = (datetime.datetime.now(pytz.timezone('Asia/Seoul')).date() - since_date).days
+        return days_elapsed >= getattr(self, 'HARD_STOP_COOLDOWN_DAYS', 5)
+
     def _generate_stock_buy_signals(self, active_brokers, holdings, sell_signals, top_5):
         buy_signals = []
+        if self._check_hard_stop_lockout():
+            return buy_signals
         total_score_sum = sum(s["total_score"] for s in top_5) if top_5 else 1.0
         
         for b_name in active_brokers:

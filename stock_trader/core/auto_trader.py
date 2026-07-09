@@ -22,7 +22,7 @@ logger = logging.getLogger("AutoTrader")
 # 3. 브로커 팩토리 임포트
 import threading
 from stock_trader.broker.broker_factory import BrokerFactory
-from stock_trader.data.db_repository import DbRepository
+from stock_trader.data.db_repository import DbRepository, is_hard_stop_lockout
 
 # 캐시 및 안전장치 전역 변수
 ATR_CACHE = {}  # {ticker: (date_str, atr_pct)} — 날짜가 바뀌면 재계산
@@ -63,8 +63,22 @@ def get_hyperparams() -> dict:
 
 def set_market_halt(active: bool, reason: str = None):
     """서킷 브레이커 상태를 메모리와 DB(market_lockout)에 함께 기록합니다.
-    프로세스가 재시작되어도 락아웃 상태가 유지됩니다."""
+    프로세스가 재시작되어도 락아웃 상태가 유지됩니다.
+
+    단, 전략 엔진이 기록한 글로벌 하드스탑 락아웃([HARD_STOP] 접두사)은
+    장중 서킷 브레이커가 덮어쓰거나 해제할 수 없습니다 — 해제는 전략 엔진의
+    쿨다운+BULL 국면 조건에서만 이뤄집니다."""
     global market_halt
+    try:
+        state = get_repo().get_market_lockout()
+        if is_hard_stop_lockout(state):
+            market_halt = True
+            if not active:
+                logger.warning("⛔ 글로벌 하드스탑 락아웃 활성 — 서킷 브레이커 해제 요청을 무시하고 매수 제한을 유지합니다.")
+            return
+    except Exception as e:
+        logger.warning(f"⚠️ market_lockout 상태 확인 실패: {e}")
+
     market_halt = active
     try:
         since = datetime.now(KST).isoformat() if active else None
@@ -310,6 +324,15 @@ def run_trade():
                 now_ts = time.time()
                 if now_ts - last_circuit_breaker_check > 180.0:
                     last_circuit_breaker_check = now_ts
+
+                    # 전략 엔진이 장중에 기록한 글로벌 하드스탑 락아웃을 메모리에 동기화
+                    try:
+                        if not market_halt and is_hard_stop_lockout(get_repo().get_market_lockout()):
+                            market_halt = True
+                            logger.warning("⛔ 글로벌 하드스탑 락아웃 감지 (전략 엔진 기록) — 신규 매수를 중단합니다.")
+                    except Exception as sync_e:
+                        logger.warning(f"⚠️ 락아웃 상태 동기화 실패: {sync_e}")
+
                     indices = get_intraday_market_indices()
                     if indices:
                         kospi_chg = indices.get("KOSPI", 0.0)
@@ -330,12 +353,14 @@ def run_trade():
                         else:
                             if market_halt:
                                 set_market_halt(False)
-                                resume_msg = f"✅ *[시장 지수 회복 - 매매 해제]*\nKOSPI: {kospi_chg:+.2f}%, KOSDAQ: {kosdaq_chg:+.2f}%\n신규 매수제한을 해제합니다."
-                                logger.info(resume_msg)
-                                try:
-                                    send_telegram_message(resume_msg)
-                                except Exception as tg_e:
-                                    logger.warning(f"텔레그램 알림 실패: {tg_e}")
+                                # 하드스탑 락아웃이면 set_market_halt(False)가 거부되어 market_halt가 유지됨
+                                if not market_halt:
+                                    resume_msg = f"✅ *[시장 지수 회복 - 매매 해제]*\nKOSPI: {kospi_chg:+.2f}%, KOSDAQ: {kosdaq_chg:+.2f}%\n신규 매수제한을 해제합니다."
+                                    logger.info(resume_msg)
+                                    try:
+                                        send_telegram_message(resume_msg)
+                                    except Exception as tg_e:
+                                        logger.warning(f"텔레그램 알림 실패: {tg_e}")
                 
                 # (보유 종목 Trailing/Hard Stop 감시는 전용 스레드 risk_monitor_loop에서 수행)
 

@@ -7,6 +7,20 @@ from contextlib import contextmanager
 # 전역 로거 설정
 logger = logging.getLogger("DbRepository")
 
+# 글로벌 하드스탑 락아웃 식별용 reason 접두사.
+# market_lockout 테이블은 (1) 장중 지수 급락 서킷 브레이커와 (2) 계좌 전체 Hard Stop 청산 후
+# 재진입 금지라는 두 용도로 공유되는데, 후자는 지수 회복만으로 해제되어서는 안 되므로
+# reason 접두사로 구분한다.
+HARD_STOP_LOCKOUT_PREFIX = "[HARD_STOP]"
+
+
+def is_hard_stop_lockout(state: dict) -> bool:
+    """market_lockout 상태가 '글로벌 하드스탑' 락아웃인지 판별합니다."""
+    if not state or not state.get("active"):
+        return False
+    return str(state.get("reason") or "").startswith(HARD_STOP_LOCKOUT_PREFIX)
+
+
 class DbRepository:
     def __init__(self, db_path: str):
         self.db_path = db_path

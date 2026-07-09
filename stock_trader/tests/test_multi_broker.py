@@ -84,6 +84,137 @@ class MultiBrokerTests(unittest.TestCase):
         nh_hold = next(h for h in holdings if h["broker_id"] == "NH_INVEST")
         self.assertEqual(nh_hold["quantity"], 3)
 
+    @patch("stock_trader.broker.broker_factory.BrokerFactory.get_active_brokers")
+    @patch("stock_trader.broker.broker_factory.BrokerFactory.get_broker")
+    def test_fetch_current_holdings_merges_max_profit_on_api_success(self, mock_get_broker, mock_get_active_brokers):
+        """API 조회 성공 경로에서도 DB의 고점 수익률(max_profit_rate)이 병합되어야 한다.
+        (회귀 테스트: 과거에는 API 성공 시 max_profit_rate가 누락되어
+        트레일링 스탑/ETF 샹들리에 스탑이 매입가 기준으로 퇴화했음)"""
+        mock_get_active_brokers.return_value = ["KOREA_INVEST"]
+        mock_broker = MagicMock()
+        # 현재 수익률 8.0% < DB 저장 고점 12.0% -> 고점 유지되어야 함
+        mock_broker.get_account_summary.return_value = {
+            "acnt_evlt_remn_indv_tot": [{
+                "stk_cd": "A005930",
+                "stk_nm": "삼성전자",
+                "prft_rt": "8.0",
+                "rmnd_qty": "5",
+                "pchs_amt": "2500000",
+                "evlt_amt": "2700000"
+            }]
+        }
+        mock_get_broker.return_value = mock_broker
+
+        holdings = self.engine.fetch_current_holdings()
+        self.assertEqual(len(holdings), 1)
+        self.assertEqual(holdings[0]["max_profit_rate"], 12.0)
+
+        # 현재 수익률 15.0% > 고점 12.0% -> 고점 갱신 및 DB 반영되어야 함
+        mock_broker.get_account_summary.return_value = {
+            "acnt_evlt_remn_indv_tot": [{
+                "stk_cd": "A005930",
+                "stk_nm": "삼성전자",
+                "prft_rt": "15.0",
+                "rmnd_qty": "5",
+                "pchs_amt": "2500000",
+                "evlt_amt": "2875000"
+            }]
+        }
+        holdings = self.engine.fetch_current_holdings()
+        self.assertEqual(holdings[0]["max_profit_rate"], 15.0)
+        self.assertEqual(self.repo.get_max_profit_rates("KOREA_INVEST").get("005930"), 15.0)
+
+    def _lockout_test_top5(self):
+        return [{
+            "ticker": "005930", "name": "삼성전자", "price": 50000.0,
+            "total_score": 90.0, "rsi": 20.0, "lower_band": 0.0, "atr_pct": 3.0
+        }]
+
+    def test_hard_stop_lockout_blocks_stock_buys(self):
+        """글로벌 하드스탑 락아웃이 활성이면 주식 프로파일 신규 매수가 차단되어야 한다."""
+        import datetime
+        from stock_trader.data.db_repository import HARD_STOP_LOCKOUT_PREFIX
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        self.repo.update_market_lockout(
+            active=True, since=today,
+            reason=f"{HARD_STOP_LOCKOUT_PREFIX} 글로벌 Hard Stop 작동 (테스트)"
+        )
+        self.engine.current_regime = "BULL"
+        self.engine.BROKER_EQUITY = {"KIWOOM": 10_000_000.0}
+        self.engine.BROKER_CASH = {"KIWOOM": 10_000_000.0}
+
+        buys = self.engine._generate_stock_buy_signals(["KIWOOM"], [], [], self._lockout_test_top5())
+        self.assertEqual(buys, [])
+        # 쿨다운 미경과이므로 락아웃은 해제되지 않아야 함 (BULL 국면이어도)
+        self.assertTrue(self.repo.get_market_lockout().get("active"))
+
+    def test_hard_stop_lockout_releases_after_cooldown_in_bull(self):
+        """쿨다운 경과 + BULL 국면이면 하드스탑 락아웃이 해제되고 매수가 재개되어야 한다."""
+        import datetime
+        from stock_trader.data.db_repository import HARD_STOP_LOCKOUT_PREFIX
+        old_date = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+        self.repo.update_market_lockout(
+            active=True, since=old_date,
+            reason=f"{HARD_STOP_LOCKOUT_PREFIX} 글로벌 Hard Stop 작동 (테스트)"
+        )
+        self.engine.current_regime = "BULL"
+        self.engine.BROKER_EQUITY = {"KIWOOM": 10_000_000.0}
+        self.engine.BROKER_CASH = {"KIWOOM": 10_000_000.0}
+
+        buys = self.engine._generate_stock_buy_signals(["KIWOOM"], [], [], self._lockout_test_top5())
+        self.assertFalse(self.repo.get_market_lockout().get("active"))
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["ticker"], "005930")
+
+    def test_hard_stop_lockout_not_released_in_bear(self):
+        """쿨다운이 지나도 BEAR 국면이면 하드스탑 락아웃이 유지되어야 한다."""
+        import datetime
+        from stock_trader.data.db_repository import HARD_STOP_LOCKOUT_PREFIX
+        old_date = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+        self.repo.update_market_lockout(
+            active=True, since=old_date,
+            reason=f"{HARD_STOP_LOCKOUT_PREFIX} 글로벌 Hard Stop 작동 (테스트)"
+        )
+        self.engine.current_regime = "BEAR"
+        self.engine.BROKER_EQUITY = {"KIWOOM": 10_000_000.0}
+        self.engine.BROKER_CASH = {"KIWOOM": 10_000_000.0}
+
+        buys = self.engine._generate_stock_buy_signals(["KIWOOM"], [], [], self._lockout_test_top5())
+        self.assertEqual(buys, [])
+        self.assertTrue(self.repo.get_market_lockout().get("active"))
+
+    def test_global_hard_stop_uses_account_equity_basis(self):
+        """글로벌 하드스탑은 계좌 전체(현금 포함) 대비 미실현 손실률로 판정해야 한다.
+        현금 비중이 높으면 보유분이 -6%여도 계좌 대비 -0.6%이므로 전량 청산이 발동하면 안 된다.
+        (개별 종목 하드스탑은 별개로 동작 가능)"""
+        holdings = [{
+            "broker_id": "KIWOOM",
+            "ticker": "005930",
+            "name": "삼성전자",
+            "profit_rate": -6.0,
+            "quantity": 10,
+            "purchase_price": 100000.0,
+            "current_price": 94000.0,
+            "max_profit_rate": 0.0,
+        }]
+        self.engine.HARD_STOP_LOSS = -5.0
+
+        # 1) 계좌 총자산 정보가 있고 현금 비중이 높은 경우 -> 글로벌 스탑 미발동
+        self.engine.BROKER_EQUITY = {"KIWOOM": 10_000_000.0}
+        signals = self.engine.generate_management_signals(holdings, top_tickers=["005930"])
+        self.assertFalse(
+            any("계좌 전체 Hard Stop Loss" in s["reason"] for s in signals),
+            f"현금 90% 상태에서 글로벌 스탑이 발동하면 안 됨: {signals}"
+        )
+
+        # 2) 계좌 총자산 정보가 없는 경우 -> 기존(보유분 매입금) 기준으로 보수적 폴백 -> 발동
+        self.engine.BROKER_EQUITY = {}
+        signals = self.engine.generate_management_signals(holdings, top_tickers=["005930"])
+        self.assertTrue(
+            any("계좌 전체 Hard Stop Loss" in s["reason"] for s in signals),
+            "총자산 정보 부재 시 보유분 기준 폴백으로 발동해야 함"
+        )
+
     def test_generate_management_signals_includes_broker_id(self):
         # Create a holding that triggers a hard stop sell
         holdings = [
