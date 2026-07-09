@@ -57,19 +57,19 @@ class BacktestConfig:
     hard_stop_cooldown_days: int = 5      # 락아웃 최소 유지 일수 (해제엔 BULL 국면 필요)
     circuit_breaker_drop: float = -3.0    # KOSPI 당일 등락률 서킷 브레이커 %
 
-    # 추세추종 진입 문턱 (_generate_stock_buy_signals 하드코딩 값의 실험용 노출)
+    # 추세추종 진입 문턱 (라이브 TF_* 하이퍼파라미터와 동일 기본값 — B1 적용 후)
     tf_rsi_min: float = 45.0
-    tf_rsi_max: float = 65.0
-    tf_rel_momentum_min: float = 3.0      # 상대강도(vs KOSPI 90일) 최소 %
+    tf_rsi_max: float = 70.0
+    tf_rel_momentum_min: float = 0.0      # 상대강도(vs KOSPI 90일) 최소 %
 
     # 교체 매도 규율 (리스크 청산에는 미적용, replacement에만 적용)
     min_holding_days: int = 5             # 교체 매도 전 최소 보유 달력일 (라이브 현행: MIN_HOLDING_DAYS=5)
     replacement_grace_days: int = 0       # 순위(top_n) 연속 이탈 유예 거래일 (0 = 라이브 현행: 미사용)
 
-    # 러너 관리: 오버슈팅 익절 시 매도 비율 (1.0 = 전량 익절, 라이브 현행)
+    # 러너 관리: 오버슈팅 익절 시 매도 비율 (라이브 OVERSHOOT_EXIT_FRACTION과 동일 기본값 — O1 적용 후)
     # 1.0 미만이면 해당 비율만 익절하고 잔여 물량은 러너로 전환되어
-    # 트레일링/하드스탑으로만 청산된다 (오버슈팅 재발동 없음).
-    overshoot_exit_fraction: float = 1.0
+    # 트레일링/하드스탑으로만 청산된다 (오버슈팅 재발동 없음). 1.0 = 전량 익절(구 버전).
+    overshoot_exit_fraction: float = 0.5
 
     # 체결 모델 (auto_trader 근사)
     target_touch_margin: float = 0.005    # 목표가 터치 인정 마진 (0.5%)

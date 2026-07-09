@@ -149,6 +149,12 @@ class StrategyEngine:
             "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
             "HARD_STOP_COOLDOWN_DAYS": 5.0,  # 글로벌 하드스탑 락아웃 최소 유지 일수 (해제에는 BULL 국면도 필요)
             "MIN_HOLDING_DAYS": 5.0,      # 교체 매도 규율: 매수 후 최소 보유 달력일 (리스크 청산에는 미적용)
+            # 추세추종 진입 문턱 (백테스트 B1 검증: 기존 하드코딩 RSI<=65 / 상대강도>3% 에서 완화)
+            "TF_RSI_MIN": 45.0,
+            "TF_RSI_MAX": 70.0,
+            "TF_REL_MOMENTUM_MIN": 0.0,
+            # 오버슈팅 익절 비율 (1.0 = 전량 익절. 0.5면 절반 익절 후 잔여 물량 러너 전환 — 백테스트 O1 검증)
+            "OVERSHOOT_EXIT_FRACTION": 0.5,
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -180,6 +186,10 @@ class StrategyEngine:
         self.BEAR_POSITION_FACTOR = float(params["BEAR_POSITION_FACTOR"])
         self.HARD_STOP_COOLDOWN_DAYS = int(params["HARD_STOP_COOLDOWN_DAYS"])
         self.MIN_HOLDING_DAYS = int(params["MIN_HOLDING_DAYS"])
+        self.TF_RSI_MIN = float(params["TF_RSI_MIN"])
+        self.TF_RSI_MAX = float(params["TF_RSI_MAX"])
+        self.TF_REL_MOMENTUM_MIN = float(params["TF_REL_MOMENTUM_MIN"])
+        self.OVERSHOOT_EXIT_FRACTION = float(params["OVERSHOOT_EXIT_FRACTION"])
 
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
@@ -475,7 +485,8 @@ class StrategyEngine:
                                     "quantity": int(row["rmnd_qty"]),
                                     "purchase_price": float(row["pur_pric"]) if row["pur_pric"] is not None else 0.0,
                                     "current_price": float(row["cur_prc"]) if row["cur_prc"] is not None else 0.0,
-                                    "max_profit_rate": float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
+                                    "max_profit_rate": float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0,
+                                    "is_runner": bool(row.get("is_runner") or 0)
                                 })
                 except Exception as db_e:
                     logger.error(f"{b_name} 로컬 DB 로드 실패: {db_e}")
@@ -491,9 +502,11 @@ class StrategyEngine:
                         current_profit = stock["profit_rate"]
 
                         stored_max_profit = 0.0
+                        stock.setdefault("is_runner", False)
                         for row in db_all:
                             if row.get("broker_id") == b_name and row["stk_cd"] == ticker:
                                 stored_max_profit = float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
+                                stock["is_runner"] = bool(row.get("is_runner") or 0)
                                 break
 
                         if current_profit > stored_max_profit:
@@ -752,24 +765,47 @@ class StrategyEngine:
                     "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
-            elif rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band:
+            elif (rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band) and not stock.get("is_runner", False):
+                # 러너 관리: 오버슈팅 시 일부만 익절하고 잔여 물량은 러너로 전환하여
+                # 트레일링/하드스탑으로만 관리한다 (러너는 오버슈팅 재발동 제외).
+                # backtest_multifactor O1 검증: 트레일링 청산 평균 +0.33% -> +8.25%, Sharpe 0.89 -> 1.07.
+                # repo가 없으면 러너 상태를 영속할 수 없으므로 기존(전량 익절) 동작 유지.
+                fraction = getattr(self, 'OVERSHOOT_EXIT_FRACTION', 1.0)
+                sell_qty = quantity
+                is_partial = False
+                if fraction < 1.0 and self.repo:
+                    part_qty = int(quantity * fraction)
+                    if 0 < part_qty < quantity:
+                        sell_qty = part_qty
+                        is_partial = True
                 feat = self._build_feature_dict(s_data, {
-                    "exit_reason": "overshooting",
+                    "exit_reason": "overshooting_partial" if is_partial else "overshooting",
                     "profit_rate": profit,
                     "max_profit_rate": max_profit,
                     "rsi": rsi_val,
                     "upper_band": upper_band
                 })
+                if is_partial:
+                    reason_txt = f"오버슈팅 부분 익절 {sell_qty}/{quantity}주, 잔여 러너 전환 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)"
+                else:
+                    reason_txt = f"오버슈팅 청산 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)"
                 sell_signals.append({
                     "broker_id": b_id,
                     "ticker": ticker,
                     "name": stock["name"],
                     "action": "SELL",
-                    "quantity": quantity,
-                    "reason": f"오버슈팅 청산 (RSI: {rsi_val:.1f}, BB상단: {upper_band:,.0f}원, 현재가: {current_price:,.0f}원)",
+                    "quantity": sell_qty,
+                    "reason": reason_txt,
                     "features": json.dumps(feat, ensure_ascii=False)
                 })
-                logger.info(f"📈 [{b_id}][오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
+                if is_partial:
+                    try:
+                        self.repo.set_position_runner(b_id, ticker, True)
+                    except Exception as runner_e:
+                        logger.error(f"[{ticker}] 러너 상태 기록 실패: {runner_e}")
+                    logger.info(f"📈 [{b_id}][오버슈팅 부분 익절] {stock['name']} {sell_qty}/{quantity}주 익절, 잔여 물량 러너 전환 (RSI {rsi_val:.1f})")
+                else:
+                    logger.info(f"📈 [{b_id}][오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
             elif ticker not in top_tickers and profit < 2.0:
                 # 교체 규율: 매수 후 MIN_HOLDING_DAYS 미경과 시 교체 매도를 유보한다.
                 # 순위 노이즈에 따른 잦은 교체가 손실+거래비용의 주범이었음
@@ -1192,8 +1228,8 @@ class StrategyEngine:
                 is_trend_following = (
                     regime_now in ("BULL", "SIDEWAY") and
                     s.get("is_aligned", False) and
-                    45.0 <= rsi_val <= 65.0 and
-                    s.get("relative_momentum", 0.0) > 3.0 and
+                    self.TF_RSI_MIN <= rsi_val <= self.TF_RSI_MAX and
+                    s.get("relative_momentum", 0.0) > self.TF_REL_MOMENTUM_MIN and
                     s.get("is_bottoming", True)
                 )
                 

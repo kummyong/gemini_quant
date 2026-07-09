@@ -70,7 +70,8 @@ def test_no_lookahead_and_trade_cycle():
         assert tr["entry_date"] > tr["entry_signal_date"], f"진입 look-ahead 발생: {tr}"
         assert tr["exit_date"] > tr["exit_signal_date"], f"청산 look-ahead 발생: {tr}"
         assert tr["exit_date"] > tr["entry_date"]
-        assert tr["exit_reason"] in {"hard_stop", "trailing_stop", "overshooting", "replacement", "global_hard_stop"}
+        assert tr["exit_reason"] in {"hard_stop", "trailing_stop", "overshooting",
+                                     "overshooting_partial", "replacement", "global_hard_stop"}
 
     # 자산 회계: 자산 곡선이 존재하고 최종 자산 > 0
     eq = results["equity_curve"]

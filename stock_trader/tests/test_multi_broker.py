@@ -240,6 +240,39 @@ class MultiBrokerTests(unittest.TestCase):
         self.assertEqual(len(signals), 1)
         self.assertIn("교체", signals[0]["reason"])
 
+    def test_overshoot_partial_exit_marks_runner(self):
+        """오버슈팅 시 OVERSHOOT_EXIT_FRACTION 비율만 익절하고 잔여 물량을 러너로 마킹해야 하며,
+        러너에는 오버슈팅이 재발동하지 않아야 한다."""
+        self.repo.update_portfolio_holding(
+            stk_cd="005930", stk_nm="삼성전자", rmnd_qty=10,
+            pur_pric=100000, cur_prc=105000, prft_rt=5.0, max_profit_rate=5.0,
+            broker_id="KIWOOM")
+        holding = {
+            "broker_id": "KIWOOM",
+            "ticker": "005930",
+            "name": "삼성전자",
+            "profit_rate": 5.0,   # 트레일링(고점-현재=0)/하드스탑 미해당
+            "quantity": 10,
+            "purchase_price": 100000.0,
+            "current_price": 105000.0,
+            "max_profit_rate": 5.0,
+        }
+        market_data = [{"ticker": "005930", "rsi": 75.0, "upper_band": 999_999_999.0, "atr_pct": 3.0}]
+
+        # 1) 오버슈팅(RSI 75) -> 절반(5주) 부분 익절 + 러너 마킹
+        signals = self.engine.generate_management_signals([dict(holding)], top_tickers=["005930"], market_data=market_data)
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0]["quantity"], 5)
+        self.assertIn("부분 익절", signals[0]["reason"])
+        db_rows = self.repo.get_portfolio_holdings()
+        runner_row = next(r for r in db_rows if r["broker_id"] == "KIWOOM" and r["stk_cd"] == "005930")
+        self.assertEqual(runner_row["is_runner"], 1)
+
+        # 2) 러너 상태의 보유분에는 오버슈팅이 재발동하지 않음
+        runner_holding = dict(holding, quantity=5, is_runner=True)
+        signals = self.engine.generate_management_signals([runner_holding], top_tickers=["005930"], market_data=market_data)
+        self.assertEqual(signals, [], f"러너에 오버슈팅이 재발동하면 안 됨: {signals}")
+
     def test_generate_management_signals_includes_broker_id(self):
         # Create a holding that triggers a hard stop sell
         holdings = [

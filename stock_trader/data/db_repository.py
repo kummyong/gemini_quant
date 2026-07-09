@@ -111,6 +111,13 @@ class DbRepository:
                 )
                 """)
 
+            # portfolio_status: 러너(오버슈팅 부분 익절 후 잔여 물량) 플래그 마이그레이션
+            cursor.execute("PRAGMA table_info(portfolio_status)")
+            pf_cols = [col[1] for col in cursor.fetchall()]
+            if pf_cols and "is_runner" not in pf_cols:
+                logger.info("⚙️ portfolio_status 테이블에 is_runner 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN is_runner INTEGER DEFAULT 0")
+
             # 3. trade_signals 테이블 체크 및 마이그레이션
             cursor.execute("PRAGMA table_info(trade_signals)")
             sig_cols = [col[1] for col in cursor.fetchall()]
@@ -309,7 +316,7 @@ class DbRepository:
         with self.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate FROM portfolio_status WHERE rmnd_qty > 0")
+            cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate, is_runner FROM portfolio_status WHERE rmnd_qty > 0")
             return [dict(row) for row in cursor.fetchall()]
 
     def update_portfolio_holding(self, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float, max_profit_rate: float, broker_id: str = 'KIWOOM'):
@@ -386,12 +393,21 @@ class DbRepository:
             return {row[0]: float(row[1]) if row[1] is not None else 0.0 for row in cursor.fetchall()}
 
     def mark_holding_sold(self, broker_id: str, stk_cd: str):
-        """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다."""
+        """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다 (러너 플래그도 함께 해제)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE portfolio_status SET rmnd_qty = 0, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
+                "UPDATE portfolio_status SET rmnd_qty = 0, is_runner = 0, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
                 (broker_id, stk_cd))
+
+    def set_position_runner(self, broker_id: str, stk_cd: str, runner: bool = True):
+        """오버슈팅 부분 익절 후 잔여 물량(러너) 여부를 기록합니다.
+        러너는 이후 오버슈팅 청산에서 제외되고 트레일링/하드스탑으로만 관리된다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE portfolio_status SET is_runner = ?, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
+                (1 if runner else 0, broker_id, stk_cd))
 
     def save_trade_history(self, ticker: str, name: str, side: str, quantity: int, price: int, amt: int, reason: str, features: str = None):
         """체결 이력 저장"""
