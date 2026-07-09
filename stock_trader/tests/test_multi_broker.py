@@ -215,6 +215,31 @@ class MultiBrokerTests(unittest.TestCase):
             "총자산 정보 부재 시 보유분 기준 폴백으로 발동해야 함"
         )
 
+    def test_replacement_respects_min_holding_days(self):
+        """교체 매도는 매수 후 MIN_HOLDING_DAYS 미경과 시 유보되어야 한다.
+        (리스크 청산이 아닌 replacement 분기에만 적용)"""
+        holdings = [{
+            "broker_id": "KIWOOM",
+            "ticker": "005930",
+            "name": "삼성전자",
+            "profit_rate": 1.0,   # 하드스탑/트레일링/오버슈팅 모두 미해당, 교체 조건(<2.0)만 해당
+            "quantity": 10,
+            "purchase_price": 100000.0,
+            "current_price": 101000.0,
+            "max_profit_rate": 1.0,
+        }]
+        # 오늘 매수 이력 기록 -> 보유 0일차 -> 교체 유보
+        self.repo.save_trade_history("005930", "삼성전자", "BUY", 10, 100000, 1000000, "테스트 매수")
+        signals = self.engine.generate_management_signals(holdings, top_tickers=[])
+        self.assertEqual(signals, [], f"최소 보유일 미경과 시 교체 매도가 유보되어야 함: {signals}")
+
+        # 매수 이력을 10일 전으로 소급 -> 교체 매도 발동
+        with self.repo.get_connection() as conn:
+            conn.execute("UPDATE trade_history SET timestamp = datetime('now', 'localtime', '-10 day') WHERE ticker = '005930'")
+        signals = self.engine.generate_management_signals(holdings, top_tickers=[])
+        self.assertEqual(len(signals), 1)
+        self.assertIn("교체", signals[0]["reason"])
+
     def test_generate_management_signals_includes_broker_id(self):
         # Create a holding that triggers a hard stop sell
         holdings = [

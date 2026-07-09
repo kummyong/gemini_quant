@@ -401,6 +401,17 @@ class DbRepository:
                 "INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (ticker, name, side, quantity, price, amt, reason, features))
 
+    def get_last_buy_timestamp(self, ticker: str):
+        """지정 종목의 가장 최근 BUY 체결 시각을 반환합니다 (기록 없으면 None).
+        strategy_engine의 교체 매도 규율(최소 보유일)에서 보유 경과일 계산에 사용."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT timestamp FROM trade_history WHERE ticker = ? AND side = 'BUY' ORDER BY timestamp DESC LIMIT 1",
+                (ticker,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+
     def get_pending_signals(self) -> list:
         """PENDING 상태의 매매 신호 전량 조회"""
         with self.get_connection() as conn:

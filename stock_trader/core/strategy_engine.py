@@ -148,6 +148,7 @@ class StrategyEngine:
             "HARD_STOP_LOSS": -5.0,
             "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
             "HARD_STOP_COOLDOWN_DAYS": 5.0,  # 글로벌 하드스탑 락아웃 최소 유지 일수 (해제에는 BULL 국면도 필요)
+            "MIN_HOLDING_DAYS": 5.0,      # 교체 매도 규율: 매수 후 최소 보유 달력일 (리스크 청산에는 미적용)
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -178,6 +179,7 @@ class StrategyEngine:
         self.HARD_STOP_LOSS = params["HARD_STOP_LOSS"]
         self.BEAR_POSITION_FACTOR = float(params["BEAR_POSITION_FACTOR"])
         self.HARD_STOP_COOLDOWN_DAYS = int(params["HARD_STOP_COOLDOWN_DAYS"])
+        self.MIN_HOLDING_DAYS = int(params["MIN_HOLDING_DAYS"])
 
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
@@ -560,6 +562,24 @@ class StrategyEngine:
             feat.update(additional)
         return feat
 
+    def _is_within_min_holding(self, ticker: str) -> bool:
+        """교체 매도 규율: 마지막 매수 후 MIN_HOLDING_DAYS(달력일) 미경과 여부.
+
+        trade_history의 최근 BUY 체결 시각으로 판정하며, 매수 이력을 확인할 수
+        없거나 조회에 실패하면 False(기존 동작: 교체 허용)로 폴백한다."""
+        if not self.repo or getattr(self, 'MIN_HOLDING_DAYS', 0) <= 0:
+            return False
+        try:
+            ts = self.repo.get_last_buy_timestamp(ticker)
+            if not ts:
+                return False
+            buy_date = datetime.datetime.strptime(str(ts)[:10], "%Y-%m-%d").date()
+            days_held = (datetime.datetime.now(pytz.timezone('Asia/Seoul')).date() - buy_date).days
+            return days_held < self.MIN_HOLDING_DAYS
+        except Exception as e:
+            logger.warning(f"[{ticker}] 최근 매수일 조회 실패 (교체 규율 미적용): {e}")
+            return False
+
     # Ensure broker_id is attached to every sell signal for multi-broker support
     def generate_management_signals(self, current_holdings: List[Dict], top_tickers: List[str], market_data: List[Dict] = None):
         """Trailing Stop 및 절대 손절선(Hard Stop Loss) 기반 매도 시그널 생성 + RSI/BB 오버슈팅 매도 (Phase 1)"""
@@ -751,6 +771,13 @@ class StrategyEngine:
                 })
                 logger.info(f"📈 [{b_id}][오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
             elif ticker not in top_tickers and profit < 2.0:
+                # 교체 규율: 매수 후 MIN_HOLDING_DAYS 미경과 시 교체 매도를 유보한다.
+                # 순위 노이즈에 따른 잦은 교체가 손실+거래비용의 주범이었음
+                # (backtest_multifactor R1 검증: 수익률 +3.74% -> +9.54%, Sharpe 0.43 -> 0.89).
+                # 리스크 청산(하드스탑/트레일링/오버슈팅)은 위 분기에서 규율과 무관하게 동작한다.
+                if self._is_within_min_holding(ticker):
+                    logger.info(f"⏳ [{b_id}][교체 유보] {stock['name']} 매수 후 {self.MIN_HOLDING_DAYS}일 미경과로 교체 매도 유보 (수익률: {profit:.2f}%)")
+                    continue
                 feat = self._build_feature_dict(s_data, {
                     "exit_reason": "replacement",
                     "profit_rate": profit,
