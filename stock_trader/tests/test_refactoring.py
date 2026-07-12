@@ -102,7 +102,7 @@ class TestRefactoring(unittest.TestCase):
         # Test secretary import
         sys.path.insert(0, os.path.join(PROJECT_DIR, "secretary"))
         try:
-            import auto_sync_history
+            __import__('auto_sync_history')
             print("  [OK] Import successful: auto_sync_history")
         except ImportError as e:
             print(f"  [WARN] Import warning for auto_sync_history: {e}")

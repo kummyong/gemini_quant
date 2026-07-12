@@ -12,7 +12,7 @@ import pytz
 
 from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, RUNTIME_DIR
 from stock_trader.communication.telegram_utils import TOKEN, CHAT_ID
-from stock_trader.ai.local_intent_router import get_local_decision, get_top_n_decisions, router
+from stock_trader.ai.local_intent_router import get_local_decision, router
 from stock_trader.ai.agent_skills import skill_router, save_training_feedback, SYSTEM_TOOLS
 from stock_trader.core.trainer import retrain_model
 

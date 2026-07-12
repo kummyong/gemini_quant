@@ -18,7 +18,7 @@ indicators.adx/sma)를 그대로 재사용하여 라이브 신호 로직과의 �
 """
 import argparse
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd

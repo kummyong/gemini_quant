@@ -4,7 +4,7 @@ import os
 import sys
 import sqlite3
 
-from stock_trader.core.strategy_engine import StrategyEngine, DB_PATH as ORIGINAL_DB_PATH
+from stock_trader.core.strategy_engine import StrategyEngine
 
 class TestStrategyEngineRealData(unittest.TestCase):
     def setUp(self):
