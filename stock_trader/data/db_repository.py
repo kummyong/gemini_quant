@@ -81,6 +81,7 @@ class DbRepository:
                     cur_prc INTEGER,
                     prft_rt REAL,
                     max_profit_rate REAL DEFAULT 0.0,
+                    out_of_top_streak INTEGER DEFAULT 0,
                     pred_sellq INTEGER DEFAULT 0,
                     tdy_sellq INTEGER DEFAULT 0,
                     last_updated DATETIME DEFAULT (datetime('now', 'localtime')),
@@ -104,6 +105,7 @@ class DbRepository:
                     cur_prc INTEGER,
                     prft_rt REAL,
                     max_profit_rate REAL DEFAULT 0.0,
+                    out_of_top_streak INTEGER DEFAULT 0,
                     pred_sellq INTEGER DEFAULT 0,
                     tdy_sellq INTEGER DEFAULT 0,
                     last_updated DATETIME DEFAULT (datetime('now', 'localtime')),
@@ -117,6 +119,18 @@ class DbRepository:
             if pf_cols and "is_runner" not in pf_cols:
                 logger.info("⚙️ portfolio_status 테이블에 is_runner 컬럼 추가 중...")
                 cursor.execute("ALTER TABLE portfolio_status ADD COLUMN is_runner INTEGER DEFAULT 0")
+            if pf_cols and "out_of_top_streak" not in pf_cols:
+                logger.info("⚙️ portfolio_status 테이블에 out_of_top_streak 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN out_of_top_streak INTEGER DEFAULT 0")
+
+            # portfolio_status: 진입(entry) 스냅샷 컬럼 마이그레이션 — trade_outcomes 학습 기반용.
+            # 실거래 진입 시점의 가격/전략유형/팩터스냅샷을 보존해 청산 시 실현수익률과 연결한다.
+            if pf_cols and "entry_date" not in pf_cols:
+                logger.info("⚙️ portfolio_status 테이블에 entry_* 컬럼 추가 중...")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN entry_date TEXT")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN entry_price REAL")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN entry_signal_type TEXT")
+                cursor.execute("ALTER TABLE portfolio_status ADD COLUMN entry_features TEXT")
 
             # 3. trade_signals 테이블 체크 및 마이그레이션
             cursor.execute("PRAGMA table_info(trade_signals)")
@@ -242,7 +256,34 @@ class DbRepository:
             )
             """)
 
-            # 11. market_lockout (시장 락아웃 상태 기록)
+            # 11. trade_outcomes (실거래 학습 기반: 진입 팩터 스냅샷 ↔ 실현 청산 결과 연결)
+            # 매도 체결(전량 청산 및 오버슈팅 부분 익절 모두) 시마다 1행씩 기록된다.
+            # position_closed=0인 행은 러너 전환(잔여 물량 보유 지속)이라 진입 스냅샷이 아직 살아있고,
+            # 같은 포지션이 나중에 완전 청산되면 position_closed=1인 행이 별도로 추가된다.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                name TEXT,
+                entry_date TEXT,
+                entry_price REAL,
+                entry_signal_type TEXT,
+                entry_features TEXT,
+                exit_date DATETIME DEFAULT (datetime('now', 'localtime')),
+                exit_price REAL,
+                exit_reason TEXT,
+                quantity INTEGER,
+                return_pct REAL,
+                holding_days INTEGER,
+                position_closed INTEGER DEFAULT 1 CHECK(position_closed IN (0, 1)),
+                created_at DATETIME DEFAULT (datetime('now', 'localtime'))
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_ticker ON trade_outcomes (ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_exit_reason ON trade_outcomes (exit_reason)")
+
+            # 11-b. market_lockout (시장 락아웃 상태 기록)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS market_lockout (
                 id INTEGER PRIMARY KEY DEFAULT 1,
@@ -274,6 +315,7 @@ class DbRepository:
                 ("TRAILING_MIN_DROP", 2.0),
                 ("TRAILING_MAX_DROP", 8.0),
                 ("MAX_CHASE_PCT", 2.0),
+                ("REPLACEMENT_GRACE_DAYS", 3.0),
                 ("BEAR_POSITION_FACTOR", 0.5),
                 ("TOP_N", 8.0),
                 ("TARGET_WEIGHT", 0.15),
@@ -318,7 +360,7 @@ class DbRepository:
         with self.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate, is_runner FROM portfolio_status WHERE rmnd_qty > 0")
+            cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate, is_runner, out_of_top_streak FROM portfolio_status WHERE rmnd_qty > 0")
             return [dict(row) for row in cursor.fetchall()]
 
     def update_portfolio_holding(self, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float, max_profit_rate: float, broker_id: str = 'KIWOOM'):
@@ -395,12 +437,72 @@ class DbRepository:
             return {row[0]: float(row[1]) if row[1] is not None else 0.0 for row in cursor.fetchall()}
 
     def mark_holding_sold(self, broker_id: str, stk_cd: str):
-        """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다 (러너 플래그도 함께 해제)."""
+        """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다 (러너 플래그·진입 스냅샷도 함께 초기화).
+        entry_* 초기화는 반드시 record_trade_outcome으로 결과를 기록한 *이후*에 호출할 것
+        (먼저 호출하면 진입 스냅샷이 사라져 학습 데이터 연결이 끊긴다)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE portfolio_status
+                SET rmnd_qty = 0, is_runner = 0, out_of_top_streak = 0,
+                    entry_date = NULL, entry_price = NULL, entry_signal_type = NULL, entry_features = NULL,
+                    last_updated = datetime('now', 'localtime')
+                WHERE broker_id = ? AND stk_cd = ?
+            """, (broker_id, stk_cd))
+
+    def record_position_entry(self, broker_id: str, stk_cd: str, stk_nm: str, entry_price: float,
+                               entry_signal_type: str, entry_features: str = None):
+        """신규 포지션 진입 시점의 가격·전략유형·팩터 스냅샷을 기록합니다.
+        이미 진입 스냅샷이 있으면(추가매수 등) 최초 진입 근거를 덮어쓰지 않습니다 —
+        max_profit_rate와 동일하게, 전략 상태는 브로커가 알 수 없는 우리 쪽 진실이기 때문."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO portfolio_status (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt,
+                                               entry_date, entry_price, entry_signal_type, entry_features, last_updated)
+                VALUES (?, ?, ?, 0, 0, 0, 0.0, datetime('now', 'localtime'), ?, ?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(broker_id, stk_cd) DO UPDATE SET
+                    entry_date = CASE WHEN portfolio_status.entry_date IS NULL THEN excluded.entry_date ELSE portfolio_status.entry_date END,
+                    entry_price = CASE WHEN portfolio_status.entry_date IS NULL THEN excluded.entry_price ELSE portfolio_status.entry_price END,
+                    entry_signal_type = CASE WHEN portfolio_status.entry_date IS NULL THEN excluded.entry_signal_type ELSE portfolio_status.entry_signal_type END,
+                    entry_features = CASE WHEN portfolio_status.entry_date IS NULL THEN excluded.entry_features ELSE portfolio_status.entry_features END
+            """, (broker_id, stk_cd, stk_nm, entry_price, entry_signal_type, entry_features))
+
+    def get_position_entry(self, broker_id: str, stk_cd: str) -> dict:
+        """포지션의 진입 스냅샷 조회 (없으면 entry_date가 None인 dict 반환)."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
             cursor.execute(
-                "UPDATE portfolio_status SET rmnd_qty = 0, is_runner = 0, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
+                "SELECT stk_nm, entry_date, entry_price, entry_signal_type, entry_features "
+                "FROM portfolio_status WHERE broker_id = ? AND stk_cd = ?",
                 (broker_id, stk_cd))
+            row = cursor.fetchone()
+            return dict(row) if row else {"stk_nm": None, "entry_date": None, "entry_price": None,
+                                           "entry_signal_type": None, "entry_features": None}
+
+    def record_trade_outcome(self, broker_id: str, ticker: str, name: str, entry_date: str, entry_price: float,
+                              entry_signal_type: str, entry_features: str, exit_price: float, exit_reason: str,
+                              quantity: int, return_pct: float, holding_days: int, position_closed: bool = True):
+        """실현된 매도(전량 청산 또는 부분 익절) 1건을 진입 팩터 스냅샷과 함께 기록합니다.
+        이 테이블이 팩터별 실현수익률 상관(IC) 분석 등 학습의 데이터 기반이 된다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO trade_outcomes (broker_id, ticker, name, entry_date, entry_price, entry_signal_type,
+                                             entry_features, exit_price, exit_reason, quantity, return_pct,
+                                             holding_days, position_closed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (broker_id, ticker, name, entry_date, entry_price, entry_signal_type, entry_features,
+                  exit_price, exit_reason, quantity, return_pct, holding_days, 1 if position_closed else 0))
+
+    def get_trade_outcomes(self, limit: int = 10000) -> list:
+        """팩터 분석용 실현 청산 결과 전량(최신순) 조회"""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cursor.fetchall()]
 
     def set_position_runner(self, broker_id: str, stk_cd: str, runner: bool = True):
         """오버슈팅 부분 익절 후 잔여 물량(러너) 여부를 기록합니다.
@@ -410,6 +512,12 @@ class DbRepository:
             cursor.execute(
                 "UPDATE portfolio_status SET is_runner = ?, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
                 (1 if runner else 0, broker_id, stk_cd))
+
+    def update_out_of_top_streak(self, broker_id: str, stk_cd: str, streak: int):
+        """종목의 순위 연속 이탈 거래일 수를 갱신합니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE portfolio_status SET out_of_top_streak = ? WHERE broker_id = ? AND stk_cd = ?", (streak, broker_id, stk_cd))
 
     def save_trade_history(self, ticker: str, name: str, side: str, quantity: int, price: int, amt: int, reason: str, features: str = None):
         """체결 이력 저장"""

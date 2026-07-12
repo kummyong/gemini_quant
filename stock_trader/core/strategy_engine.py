@@ -159,6 +159,8 @@ class StrategyEngine:
             "CHANDELIER_ATR_MULT": 2.5,
             "TRAILING_MIN_DROP": 2.0,
             "TRAILING_MAX_DROP": 8.0,
+            # 교체 유예일 (백테스트 실험 ④ 검증: 3일 유예 시 노이즈성 교체 감소 효과)
+            "REPLACEMENT_GRACE_DAYS": 3.0,
             # 배치 확대 (백테스트 실험⑥ 검증: top5/10% → top8/15%, MDD -4%→-8% 트레이드오프 수반)
             "TOP_N": 8.0,
             "TARGET_WEIGHT": 0.15,
@@ -200,6 +202,7 @@ class StrategyEngine:
         self.CHANDELIER_ATR_MULT = float(params["CHANDELIER_ATR_MULT"])
         self.TRAILING_MIN_DROP = float(params["TRAILING_MIN_DROP"])
         self.TRAILING_MAX_DROP = float(params["TRAILING_MAX_DROP"])
+        self.REPLACEMENT_GRACE_DAYS = int(params.get("REPLACEMENT_GRACE_DAYS", 3.0))
         self.TOP_N = int(params["TOP_N"])
         # ETF_TREND 프로파일의 비중 산정은 별도 검증 전이므로 주식 프로파일에만 적용
         if self.profile != ETF_TREND:
@@ -500,7 +503,8 @@ class StrategyEngine:
                                     "purchase_price": float(row["pur_pric"]) if row["pur_pric"] is not None else 0.0,
                                     "current_price": float(row["cur_prc"]) if row["cur_prc"] is not None else 0.0,
                                     "max_profit_rate": float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0,
-                                    "is_runner": bool(row.get("is_runner") or 0)
+                                    "is_runner": bool(row.get("is_runner") or 0),
+                                    "out_of_top_streak": int(row.get("out_of_top_streak") or 0)
                                 })
                 except Exception as db_e:
                     logger.error(f"{b_name} 로컬 DB 로드 실패: {db_e}")
@@ -517,10 +521,12 @@ class StrategyEngine:
 
                         stored_max_profit = 0.0
                         stock.setdefault("is_runner", False)
+                        stock.setdefault("out_of_top_streak", 0)
                         for row in db_all:
                             if row.get("broker_id") == b_name and row["stk_cd"] == ticker:
                                 stored_max_profit = float(row["max_profit_rate"]) if row["max_profit_rate"] is not None else 0.0
                                 stock["is_runner"] = bool(row.get("is_runner") or 0)
+                                stock["out_of_top_streak"] = int(row.get("out_of_top_streak") or 0)
                                 break
 
                         if current_profit > stored_max_profit:
@@ -736,6 +742,19 @@ class StrategyEngine:
             current_price = stock.get("current_price", 0.0)
             b_id = stock.get("broker_id", "KIWOOM")
             
+            # 교체 규율용: top_n 연속 이탈 거래일 추적 (주식 프로파일 한정)
+            out_of_top_streak = stock.get("out_of_top_streak", 0)
+            if self.profile != ETF_TREND:
+                if ticker not in top_tickers:
+                    out_of_top_streak += 1
+                else:
+                    out_of_top_streak = 0
+                if self.repo:
+                    try:
+                        self.repo.update_out_of_top_streak(b_id, ticker, out_of_top_streak)
+                    except Exception as e:
+                        logger.error(f"[{b_id}][{ticker}] out_of_top_streak 갱신 실패: {e}")
+            
             s_data = market_map.get(ticker, {})
             rsi_val = s_data.get("rsi", 50.0)
             upper_band = s_data.get("upper_band", 999999999.0)
@@ -829,6 +848,12 @@ class StrategyEngine:
                 if self._is_within_min_holding(ticker):
                     logger.info(f"⏳ [{b_id}][교체 유보] {stock['name']} 매수 후 {self.MIN_HOLDING_DAYS}일 미경과로 교체 매도 유보 (수익률: {profit:.2f}%)")
                     continue
+                
+                grace_days = getattr(self, 'REPLACEMENT_GRACE_DAYS', 0)
+                if out_of_top_streak <= grace_days:
+                    logger.info(f"⏳ [{b_id}][교체 유보] {stock['name']} 순위 이탈 유예기간({out_of_top_streak}/{grace_days}일) 이내로 교체 매도 유보 (수익률: {profit:.2f}%)")
+                    continue
+                    
                 feat = self._build_feature_dict(s_data, {
                     "exit_reason": "replacement",
                     "profit_rate": profit,

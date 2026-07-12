@@ -227,6 +227,7 @@ class MultiBrokerTests(unittest.TestCase):
             "purchase_price": 100000.0,
             "current_price": 101000.0,
             "max_profit_rate": 1.0,
+            "out_of_top_streak": 4,  # REPLACEMENT_GRACE_DAYS(3) 초과하도록 모의 설정
         }]
         # 오늘 매수 이력 기록 -> 보유 0일차 -> 교체 유보
         self.repo.save_trade_history("005930", "삼성전자", "BUY", 10, 100000, 1000000, "테스트 매수")
