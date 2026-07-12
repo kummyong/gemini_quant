@@ -185,6 +185,9 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.assertAlmostEqual(scored[2]["total_score"], 12.5)
 
     def test_trailing_stop_logic(self):
+        # 테스트를 위해 트레일링 스탑 민감도 임시 조절 (ATR 기본 3.0% * 1.0 = 3.0% 하락시 작동)
+        self.engine.CHANDELIER_ATR_MULT = 1.0
+        
         # 1. 고점이 +3.0% 였고, 현재 수익률이 0.0%인 경우 (3.0%p 이상 하락) -> Trailing Stop 매도 작동 검증
         current_holdings = [
             {
