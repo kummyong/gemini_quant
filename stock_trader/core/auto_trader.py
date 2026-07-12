@@ -4,6 +4,7 @@ import time
 import logging
 import pytz
 import json
+import re
 from datetime import datetime
 from stock_trader.communication.telegram_utils import send_telegram_message
 
@@ -247,6 +248,15 @@ def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int,
                 is_success = True
                 
         if is_success:
+            # 학습 기반: 실시간 감시발 청산은 항상 전량 청산이므로 mark_holding_sold(진입 스냅샷 초기화) 이전에 결과부터 기록
+            exit_reason = "hard_stop"
+            try:
+                if features:
+                    exit_reason = json.loads(features).get("exit_reason", exit_reason)
+            except Exception:
+                pass
+            record_position_outcome(broker_id, ticker, name, est_price, exit_reason, qty, position_closed=True)
+
             # DB 기록: 포지션 수량 0 처리 + 체결 이력
             get_repo().mark_holding_sold(broker_id, ticker)
             get_repo().save_trade_history(ticker, name, "SELL", qty, int(est_price), int(est_price * qty), f"[실시간감시] {reason}", features)
@@ -270,6 +280,43 @@ def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int,
             logger.error(f"❌ 실시간 매도 주문 실패: {name} - {fail_reason}")
     except Exception as e:
         logger.error(f"❌ trigger_realtime_sell 도중 오류: {e}")
+
+def parse_entry_signal_type(reason: str) -> str:
+    """매수 신호의 reason 문자열에서 전략 유형 라벨을 추출합니다.
+    예: "[역추세] RSI: 28.0, ..." -> "역추세", "ETF 신규진입" -> "ETF 신규진입" (대괄호 없으면 그대로)."""
+    if not reason:
+        return "UNKNOWN"
+    m = re.match(r'^\[(.+?)\]', reason)
+    return m.group(1) if m else reason.split(',')[0].strip()[:30]
+
+def record_position_outcome(broker_id: str, ticker: str, fallback_name: str, exit_price: float,
+                            exit_reason: str, sold_qty: int, position_closed: bool):
+    """포지션의 진입 스냅샷을 조회해 실현 손익을 trade_outcomes에 기록합니다.
+    진입 스냅샷이 없으면(과거 데이터이거나 브로커 대사로 발견된 미기록 포지션 등) 조용히 건너뜁니다."""
+    try:
+        entry = get_repo().get_position_entry(broker_id, ticker)
+        if not entry.get("entry_date") or not entry.get("entry_price"):
+            logger.info(f"ℹ️ [{ticker}] 진입 스냅샷이 없어 trade_outcomes 기록 생략 (학습 기반 미적용 대상)")
+            return
+        entry_price = float(entry["entry_price"])
+        if entry_price <= 0:
+            return
+        return_pct = (exit_price - entry_price) / entry_price * 100.0
+        try:
+            entry_dt = datetime.fromisoformat(entry["entry_date"])
+            holding_days = max(0, (datetime.now(KST).replace(tzinfo=None) - entry_dt.replace(tzinfo=None)).days)
+        except Exception:
+            holding_days = 0
+        get_repo().record_trade_outcome(
+            broker_id=broker_id, ticker=ticker, name=entry.get("stk_nm") or fallback_name,
+            entry_date=entry["entry_date"], entry_price=entry_price,
+            entry_signal_type=entry.get("entry_signal_type"), entry_features=entry.get("entry_features"),
+            exit_price=exit_price, exit_reason=exit_reason, quantity=sold_qty,
+            return_pct=return_pct, holding_days=holding_days, position_closed=position_closed
+        )
+        logger.info(f"📊 [학습기반] {ticker} 실현결과 기록 (진입:{entry_price:,.0f} → 청산:{exit_price:,.0f}, 수익률:{return_pct:+.2f}%, 완전청산:{position_closed})")
+    except Exception as e:
+        logger.warning(f"⚠️ [{ticker}] trade_outcomes 기록 실패: {e}")
 
 def estimate_fill_price(api, ticker: str, fallback_price: float) -> float:
     """시장가 주문 직후 계좌를 재조회하여 실제 평균 매입단가를 확인합니다.
@@ -502,7 +549,27 @@ def run_trade():
                                 get_repo().complete_signal(sig['id'])
                                 get_repo().save_trade_history(sig['ticker'], sig['name'], sig['action'], qty, int(fill_price), int(fill_price * qty), sig['reason'], sig['features'])
                                 logger.info(f"✅ DB 기록 완료: {sig['name']} (체결단가 추정: {fill_price:,.0f}원)")
-                                
+
+                                # 학습 기반: 진입 시 팩터 스냅샷 기록 / 청산 시 진입 대비 실현 결과 기록
+                                if sig['action'] == 'BUY':
+                                    get_repo().record_position_entry(
+                                        broker_id=broker_id, stk_cd=sig['ticker'], stk_nm=sig['name'],
+                                        entry_price=fill_price, entry_signal_type=parse_entry_signal_type(sig['reason']),
+                                        entry_features=sig['features'])
+                                else:
+                                    exit_reason = "unknown"
+                                    try:
+                                        if sig['features']:
+                                            exit_reason = json.loads(sig['features']).get("exit_reason", exit_reason)
+                                    except Exception:
+                                        pass
+                                    # 오버슈팅 부분 익절(러너 전환)만 포지션이 계속 살아있는 부분 청산이고, 그 외는 전량 청산
+                                    is_full_close = (exit_reason != "overshooting_partial")
+                                    record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
+                                                            exit_reason, qty, position_closed=is_full_close)
+                                    if is_full_close:
+                                        get_repo().mark_holding_sold(broker_id, sig['ticker'])
+
                                 # 텔레그램 매매 알림 전송
                                 action_emoji = "🟢" if sig['action'] == "BUY" else "🔴"
                                 action_text = "매수" if sig['action'] == "BUY" else "매도"
