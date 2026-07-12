@@ -155,6 +155,13 @@ class StrategyEngine:
             "TF_REL_MOMENTUM_MIN": 0.0,
             # 오버슈팅 익절 비율 (1.0 = 전량 익절. 0.5면 절반 익절 후 잔여 물량 러너 전환 — 백테스트 O1 검증)
             "OVERSHOOT_EXIT_FRACTION": 0.5,
+            # Chandelier Exit 트레일링 — auto_trader 실시간 감시와 동일 키 공유 (백테스트 실험② 검증: 1.5→2.5)
+            "CHANDELIER_ATR_MULT": 2.5,
+            "TRAILING_MIN_DROP": 2.0,
+            "TRAILING_MAX_DROP": 8.0,
+            # 배치 확대 (백테스트 실험⑥ 검증: top5/10% → top8/15%, MDD -4%→-8% 트레이드오프 수반)
+            "TOP_N": 8.0,
+            "TARGET_WEIGHT": 0.15,
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -190,6 +197,13 @@ class StrategyEngine:
         self.TF_RSI_MAX = float(params["TF_RSI_MAX"])
         self.TF_REL_MOMENTUM_MIN = float(params["TF_REL_MOMENTUM_MIN"])
         self.OVERSHOOT_EXIT_FRACTION = float(params["OVERSHOOT_EXIT_FRACTION"])
+        self.CHANDELIER_ATR_MULT = float(params["CHANDELIER_ATR_MULT"])
+        self.TRAILING_MIN_DROP = float(params["TRAILING_MIN_DROP"])
+        self.TRAILING_MAX_DROP = float(params["TRAILING_MAX_DROP"])
+        self.TOP_N = int(params["TOP_N"])
+        # ETF_TREND 프로파일의 비중 산정은 별도 검증 전이므로 주식 프로파일에만 적용
+        if self.profile != ETF_TREND:
+            self.TARGET_WEIGHT = float(params["TARGET_WEIGHT"])
 
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])
@@ -727,9 +741,10 @@ class StrategyEngine:
             upper_band = s_data.get("upper_band", 999999999.0)
             
             # 종목별 변동성(ATR%) 로드하여 동적 손절선/트레일링스탑 계산 (Chandelier Exit)
+            # 트레일링은 auto_trader 실시간 감시와 동일한 DB 파라미터를 사용 — 이중 기준 불일치 방지
             atr_pct = s_data.get("atr_pct", 3.0)
             dynamic_hard_stop = -max(3.0, min(8.0, 1.5 * atr_pct))
-            dynamic_trailing_stop = max(2.0, min(5.0, 1.5 * atr_pct))
+            dynamic_trailing_stop = max(self.TRAILING_MIN_DROP, min(self.TRAILING_MAX_DROP, self.CHANDELIER_ATR_MULT * atr_pct))
             
             if profit <= dynamic_hard_stop:
                 feat = self._build_feature_dict(s_data, {
@@ -978,7 +993,7 @@ class StrategyEngine:
         
         market_data = self.fetch_market_data()
         scored_stocks = self.calculate_scores(market_data)
-        top_5 = scored_stocks[:5]
+        top_5 = scored_stocks[:self.TOP_N]
         top_tickers = [s["ticker"] for s in top_5]
 
         active_brokers = BrokerFactory.get_active_brokers()

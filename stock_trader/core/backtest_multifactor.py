@@ -36,9 +36,9 @@ class BacktestConfig:
     end: str = "2026-12-31"
     initial_cash: float = 100_000_000.0
 
-    # 포트폴리오/자금 관리 (strategy_engine 기본값과 동일)
-    top_n: int = 5
-    target_weight: float = 0.10
+    # 포트폴리오/자금 관리 (strategy_engine 기본값과 동일 — 실험⑥ 검증 후 top5/10% → top8/15%)
+    top_n: int = 8
+    target_weight: float = 0.15
     max_single_order_ratio: float = 0.20
 
     # 국면별 진입 파라미터 (_load_hyperparams / _determine_market_regime 기본값)
@@ -70,6 +70,14 @@ class BacktestConfig:
     # 1.0 미만이면 해당 비율만 익절하고 잔여 물량은 러너로 전환되어
     # 트레일링/하드스탑으로만 청산된다 (오버슈팅 재발동 없음). 1.0 = 전량 익절(구 버전).
     overshoot_exit_fraction: float = 0.5
+
+    # 개별 스탑 파라미터 (라이브 현행: strategy_engine·auto_trader 모두 DB CHANDELIER_* 키 공유 — 실험② 검증)
+    chandelier_atr_mult: float = 2.5
+    trailing_min_drop: float = 2.0
+    trailing_max_drop: float = 8.0
+    indiv_hard_atr_mult: float = 1.5
+    indiv_hard_min: float = 3.0
+    indiv_hard_max: float = 8.0
 
     # 체결 모델 (auto_trader 근사)
     target_touch_margin: float = 0.005    # 목표가 터치 인정 마진 (0.5%)
@@ -297,8 +305,8 @@ class MultiFactorBacktester:
             rsi_val = feats.get("rsi", 50.0)
             upper_band = feats.get("upper_band", 0.0) or 999_999_999.0
             atr_pct = feats.get("atr_pct", 3.0)
-            dynamic_hard_stop = -max(3.0, min(8.0, 1.5 * atr_pct))
-            dynamic_trailing_stop = max(2.0, min(5.0, 1.5 * atr_pct))
+            dynamic_hard_stop = -max(cfg.indiv_hard_min, min(cfg.indiv_hard_max, cfg.indiv_hard_atr_mult * atr_pct))
+            dynamic_trailing_stop = max(cfg.trailing_min_drop, min(cfg.trailing_max_drop, cfg.chandelier_atr_mult * atr_pct))
 
             reason = None
             if profit <= dynamic_hard_stop:
