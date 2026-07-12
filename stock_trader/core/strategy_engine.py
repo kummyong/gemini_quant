@@ -164,6 +164,9 @@ class StrategyEngine:
             # 배치 확대 (백테스트 실험⑥ 검증: top5/10% → top8/15%, MDD -4%→-8% 트레이드오프 수반)
             "TOP_N": 8.0,
             "TARGET_WEIGHT": 0.15,
+            # 1회 주문 최대 비율(예수금 대비). 기존엔 클래스 상수로 고정돼 SYSTEM_UPDATE로 튜닝이
+            # 불가능했음 — 소액 실전 계좌(예: 100만원)에서는 이 값이 사실상의 병목이라 튜닝 가능하게 노출.
+            "MAX_SINGLE_ORDER_RATIO": 0.20,
             "ETF_ATR_PERIOD": 20.0,
             "ETF_ATR_MULTIPLIER": 3.0,
             "ETF_TREND_SMA_PERIOD": 200.0,
@@ -207,6 +210,7 @@ class StrategyEngine:
         # ETF_TREND 프로파일의 비중 산정은 별도 검증 전이므로 주식 프로파일에만 적용
         if self.profile != ETF_TREND:
             self.TARGET_WEIGHT = float(params["TARGET_WEIGHT"])
+            self.MAX_SINGLE_ORDER_RATIO = float(params["MAX_SINGLE_ORDER_RATIO"])
 
         self.ETF_ATR_PERIOD = int(params["ETF_ATR_PERIOD"])
         self.ETF_ATR_MULTIPLIER = float(params["ETF_ATR_MULTIPLIER"])

@@ -319,6 +319,7 @@ class DbRepository:
                 ("BEAR_POSITION_FACTOR", 0.5),
                 ("TOP_N", 8.0),
                 ("TARGET_WEIGHT", 0.15),
+                ("MAX_SINGLE_ORDER_RATIO", 0.20),
                 ("BULL_RSI", 30.0),
                 ("BULL_BB", 2.0),
                 ("BEAR_RSI", 25.0),
