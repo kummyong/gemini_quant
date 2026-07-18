@@ -239,7 +239,7 @@ def monitor_holdings_and_stops():
             try:
                 db_holdings = get_repo().get_max_profit_rates(b_name)
             except Exception as db_e:
-                logger.error(f"❌ 감시 중 DB 조회 에러: {db_e}")
+                logger.exception(f"❌ 감시 중 DB 조회 에러: {db_e}")
                 
             for h in holdings:
                 ticker = h["stk_cd"].replace("A", "")
@@ -260,7 +260,7 @@ def monitor_holdings_and_stops():
                         pur_pric=purchase_price, cur_prc=current_price,
                         prft_rt=profit, max_profit_rate=new_max, broker_id=b_name)
                 except Exception as db_e:
-                    logger.error(f"❌ 감시 중 DB 업데이트 에러: {db_e}")
+                    logger.exception(f"❌ 감시 중 DB 업데이트 에러: {db_e}")
                 
                 # 2. Hard Stop Loss 판정 (기준: strategy_hyperparams.HARD_STOP_LOSS)
                 hard_stop_loss_limit = get_hyperparams()["HARD_STOP_LOSS"]
@@ -294,7 +294,7 @@ def monitor_holdings_and_stops():
                         trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Trailing Stop 작동 (고점: {new_max:.2f}%, 현재: {profit:.2f}%, 하락폭: {new_max-profit:.2f}%p)", json.dumps(sell_feat, ensure_ascii=False), est_price=current_price)
                         
         except Exception as e:
-            logger.error(f"❌ 보유 종목 실시간 감시 루프 에러: {e}")
+            logger.exception(f"❌ 보유 종목 실시간 감시 루프 에러: {e}")
  
 def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int, reason: str, features: str = None, est_price: float = 0.0):
     """실시간 청산 매도 주문 전송 및 알림 (est_price: 주문 시점 현재가 — 체결가 추정 기록용)"""
@@ -309,18 +309,19 @@ def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int,
                 is_success = True
                 
         if is_success:
-            # 학습 기반: 실시간 감시발 청산은 항상 전량 청산이므로 mark_holding_sold(진입 스냅샷 초기화) 이전에 결과부터 기록
             exit_reason = "hard_stop"
             try:
                 if features:
                     exit_reason = json.loads(features).get("exit_reason", exit_reason)
             except Exception:
                 pass
-            record_position_outcome(broker_id, ticker, name, est_price, exit_reason, qty, position_closed=True)
 
-            # DB 기록: 포지션 수량 0 처리 + 체결 이력
-            get_repo().mark_holding_sold(broker_id, ticker)
-            get_repo().save_trade_history(ticker, name, "SELL", qty, int(est_price), int(est_price * qty), f"[실시간감시] {reason}", features)
+            # 주문 접수 성공 != 전량 체결 확정. 계좌를 재조회해 실제 잔여 수량을 확인한 뒤에만
+            # 포지션을 정리한다 (부분체결이면 잔여 물량의 peak/entry 스냅샷을 보존).
+            filled_qty, is_full_close = apply_sell_result(broker_id, ticker, name, qty, api, est_price, exit_reason)
+            record_position_outcome(broker_id, ticker, name, est_price, exit_reason, filled_qty, position_closed=is_full_close)
+
+            get_repo().save_trade_history(ticker, name, "SELL", filled_qty, int(est_price), int(est_price * filled_qty), f"[실시간감시] {reason}", features)
                 
             # 텔레그램 알림
             trade_msg = (
@@ -340,7 +341,7 @@ def trigger_realtime_sell(broker_id: str, api, ticker: str, name: str, qty: int,
             fail_reason = str(res.get('return_msg', '')) if res else 'No response'
             logger.error(f"❌ 실시간 매도 주문 실패: {name} - {fail_reason}")
     except Exception as e:
-        logger.error(f"❌ trigger_realtime_sell 도중 오류: {e}")
+        logger.exception(f"❌ trigger_realtime_sell 도중 오류: {e}")
 
 def parse_entry_signal_type(reason: str) -> str:
     """매수 신호의 reason 문자열에서 전략 유형 라벨을 추출합니다.
@@ -379,6 +380,59 @@ def record_position_outcome(broker_id: str, ticker: str, fallback_name: str, exi
     except Exception as e:
         logger.warning(f"⚠️ [{ticker}] trade_outcomes 기록 실패: {e}")
 
+def confirm_sell_fill(api, ticker: str):
+    """매도 주문 접수 성공 응답 직후 계좌를 재조회해 실제 잔여 수량을 확인합니다.
+    '주문 접수 성공'이 '요청 수량 전량 체결'을 보장하지 않는다 — 특히 트레일링/하드스탑이
+    발동하는 패닉성 매도 상황일수록 호가 물량 부족으로 인한 부분체결 가능성이 높아진다.
+    반환: (잔여수량, 계좌상의 보유 행 dict) — 계좌에 더 이상 없으면 (0, {}).
+          재조회 자체가 실패하면 (None, None) — 호출부가 기존 낙관적 처리(전량 매도 간주)로
+          폴백할 수 있게 구분해서 반환한다."""
+    try:
+        time.sleep(1.5)  # 시장가 체결 반영 대기 (estimate_fill_price와 동일 패턴)
+        summary = api.get_account_summary()
+        holdings = (summary or {}).get("acnt_evlt_remn_indv_tot") or []
+        for h in holdings:
+            if str(h.get("stk_cd", "")).replace("A", "") == ticker:
+                return int(h.get("rmnd_qty", 0)), h
+        return 0, {}  # 보유 목록에 더 이상 없음 = 전량 청산됨
+    except Exception as e:
+        logger.warning(f"⚠️ 매도 후 잔여수량 확인 실패 ({ticker}) — 낙관적 전량청산으로 처리: {e}")
+        return None, None
+
+def apply_sell_result(broker_id: str, ticker: str, name: str, requested_qty: int, api,
+                      est_price: float, exit_reason: str):
+    """매도 성공 응답 이후 실제 잔여 수량을 확인해 DB를 정확히 반영합니다.
+    - 확인 결과 잔여 0(전량 체결): 기존과 동일하게 mark_holding_sold로 정리.
+    - 잔여 수량 있음(부분체결): 포지션을 삭제하지 않고 실제 잔여 수량으로 갱신하며,
+      트레일링 스탑 고점(max_profit_rate)과 진입 스냅샷(entry_*)은 그대로 보존한다 —
+      부분체결됐다고 나머지 물량의 리스크 관리 상태를 초기화할 이유가 없다.
+    - 재조회 자체가 실패: 기존 낙관적 처리(요청 수량 전량 매도 간주)로 폴백한다.
+    반환: (실제 체결된 것으로 간주할 수량, 완전청산 여부) — 학습 기반 기록에 그대로 사용."""
+    remaining_qty, holding_row = confirm_sell_fill(api, ticker)
+
+    if remaining_qty is None or remaining_qty <= 0:
+        get_repo().mark_holding_sold(broker_id, ticker)
+        return requested_qty, True
+
+    filled_qty = max(0, requested_qty - remaining_qty)
+    logger.warning(
+        f"⚠️ [{name}] 매도 부분체결 감지: 요청 {requested_qty}주 중 {remaining_qty}주 잔여 "
+        f"(체결 {filled_qty}주) — 잔여 물량의 트레일링 고점/진입 스냅샷은 보존합니다."
+    )
+    try:
+        stored_max = get_repo().get_max_profit_rates(broker_id).get(ticker, 0.0)
+        new_pur_pric = float(holding_row.get("pchs_amt", 0.0)) / max(1, remaining_qty)
+        new_cur_prc = float(holding_row.get("evlt_amt", 0.0)) / max(1, remaining_qty)
+        prft_rt_raw = holding_row.get("prft_rt", 0.0)
+        new_prft_rt = float(prft_rt_raw) if prft_rt_raw not in (None, "") else 0.0
+        get_repo().update_portfolio_holding(
+            stk_cd=ticker, stk_nm=name, rmnd_qty=remaining_qty,
+            pur_pric=new_pur_pric, cur_prc=new_cur_prc, prft_rt=new_prft_rt,
+            max_profit_rate=stored_max, broker_id=broker_id)
+    except Exception as e:
+        logger.exception(f"❌ [{ticker}] 부분체결 후 DB 갱신 실패: {e}")
+    return (filled_qty if filled_qty > 0 else requested_qty), False
+
 def estimate_fill_price(api, ticker: str, fallback_price: float) -> float:
     """시장가 주문 직후 계좌를 재조회하여 실제 평균 매입단가를 확인합니다.
     (직전 보유분이 있으면 평단가가 섞이는 한계가 있음) 확인 실패 시 주문 직전 현재가로 대체."""
@@ -409,7 +463,7 @@ def risk_monitor_loop():
             else:
                 time.sleep(300)
         except Exception as e:
-            logger.error(f"❌ 리스크 감시 스레드 오류: {e}")
+            logger.exception(f"❌ 리스크 감시 스레드 오류: {e}")
             time.sleep(30)
 
 def run_trade():
@@ -624,12 +678,17 @@ def run_trade():
                                             exit_reason = json.loads(sig['features']).get("exit_reason", exit_reason)
                                     except Exception:
                                         pass
-                                    # 오버슈팅 부분 익절(러너 전환)만 포지션이 계속 살아있는 부분 청산이고, 그 외는 전량 청산
-                                    is_full_close = (exit_reason != "overshooting_partial")
-                                    record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
-                                                            exit_reason, qty, position_closed=is_full_close)
-                                    if is_full_close:
-                                        get_repo().mark_holding_sold(broker_id, sig['ticker'])
+                                    # 오버슈팅 부분 익절(러너 전환)은 전략상 의도된 부분매도라 그대로 두고,
+                                    # 그 외(하드스탑/트레일링/교체/글로벌손절)는 전량 청산을 기대하는 주문이므로
+                                    # 접수 성공만으로 단정하지 않고 계좌 재조회로 실제 잔여 수량을 확인한다.
+                                    if exit_reason == "overshooting_partial":
+                                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
+                                                                exit_reason, qty, position_closed=False)
+                                    else:
+                                        filled_qty, is_full_close = apply_sell_result(
+                                            broker_id, sig['ticker'], sig['name'], qty, api, fill_price, exit_reason)
+                                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
+                                                                exit_reason, filled_qty, position_closed=is_full_close)
 
                                 # 텔레그램 매매 알림 전송
                                 action_emoji = "🟢" if sig['action'] == "BUY" else "🔴"
@@ -649,7 +708,7 @@ def run_trade():
                                 except Exception as tg_e:
                                     logger.warning(f"텔레그램 알림 전송 실패 (매매는 정상 처리됨): {tg_e}")
                             except Exception as db_e:
-                                logger.error(f"❌ DB 업데이트 실패: {db_e}")
+                                logger.exception(f"❌ DB 업데이트 실패: {db_e}")
                         else:
                             fail_reason = str(res.get('return_msg', '')) if res else 'No response'
                             logger.warning(f"⚠️ 주문 실패: {sig['name']} - {fail_reason}")
@@ -657,7 +716,7 @@ def run_trade():
                                 get_repo().cancel_signal(sig['id'], f"실패: {fail_reason[:100]}")
                                 logger.info(f"📝 FAILED 상태 업데이트 완료: {sig['name']}")
                             except Exception as db_e:
-                                logger.error(f"❌ FAILED 상태 DB 업데이트 실패: {db_e}")
+                                logger.exception(f"❌ FAILED 상태 DB 업데이트 실패: {db_e}")
                             
                             fail_msg = (
                                 f"⚠️ *[주문 실패]*\n"
@@ -685,7 +744,7 @@ def run_trade():
                 logger.info(f"💤 장외 대기 중... ({now.strftime('%H:%M:%S')})")
                 wait_sec = 600
         except Exception as e:
-            logger.error(f"❌ 루프 오류: {e}")
+            logger.exception(f"❌ 루프 오류: {e}")
             wait_sec = 10
             
         time.sleep(wait_sec)

@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import json
 import pandas as pd
 import logging
@@ -115,21 +114,19 @@ class StrategyEngine:
                         logger.info(f"💰 [{b_name}] 총자산: {total_assets:,.0f}원, 예수금: {cash:,.0f}원")
                         continue
             except Exception as e:
-                logger.error(f"❌ {b_name} 계좌 잔고 API 조회 실패: {e}")
+                logger.exception(f"❌ {b_name} 계좌 잔고 API 조회 실패: {e}")
             
-            # DB 폴백 (API 실패 시)
+            # DB 폴백 (API 실패 시) — Repository를 거쳐 WAL/busy_timeout 등 커넥션 설정을 일관되게 적용
             try:
                 if self.repo:
-                    import sqlite3
-                    with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
-                        row = conn.execute("SELECT total_assets, cash FROM account_summary ORDER BY id DESC LIMIT 1").fetchone()
-                        if row:
-                            self.BROKER_EQUITY[b_name] = float(row[0])
-                            self.BROKER_CASH[b_name] = float(row[1])
-                            logger.info(f"💰 [{b_name}] (DB 폴백) 총자산: {self.BROKER_EQUITY[b_name]:,.0f}원, 예수금: {self.BROKER_CASH[b_name]:,.0f}원")
-                            continue
+                    row = self.repo.get_latest_account_summary()
+                    if row:
+                        self.BROKER_EQUITY[b_name] = float(row["total_assets"])
+                        self.BROKER_CASH[b_name] = float(row["cash"])
+                        logger.info(f"💰 [{b_name}] (DB 폴백) 총자산: {self.BROKER_EQUITY[b_name]:,.0f}원, 예수금: {self.BROKER_CASH[b_name]:,.0f}원")
+                        continue
             except Exception as e:
-                logger.error(f"❌ {b_name} DB 폴백 잔고 조회 실패: {e}")
+                logger.exception(f"❌ {b_name} DB 폴백 잔고 조회 실패: {e}")
             
             # 최종 폴백
             logger.warning(f"⚠️ {b_name} 계좌 잔고를 확인할 수 없어 자금을 0으로 설정합니다.")
@@ -181,7 +178,7 @@ class StrategyEngine:
                         params[k] = float(v)
             logger.info(f"✅ DB에서 파라미터 로드 완료: {params}")
         except Exception as e:
-            logger.error(f"⚠️ DB 파라미터 로드 실패 (기존 설정값 유지): {e}")
+            logger.exception(f"⚠️ DB 파라미터 로드 실패 (기존 설정값 유지): {e}")
         
         self.BULL_RSI = params["BULL_RSI"]
         self.BULL_BB = params["BULL_BB"]
@@ -277,7 +274,7 @@ class StrategyEngine:
             else:
                 raise ValueError("코스피 데이터가 부족합니다.")
         except Exception as e:
-            logger.error(f"❌ 국면 판독 실패 (안전장치 발동: 보수적 BEAR 파라미터 적용): {e}")
+            logger.exception(f"❌ 국면 판독 실패 (안전장치 발동: 보수적 BEAR 파라미터 적용): {e}")
             self.current_regime = "BEAR (Fallback)"
             self.RSI_BUY_THRES = self.BEAR_RSI
             self.BB_STD = self.BEAR_BB
@@ -310,7 +307,7 @@ class StrategyEngine:
             logger.info(f"✅ 서킷 브레이커 통과 (코스피 변동률: {kospi_daily_change:+.2f}%)")
             return True
         except Exception as e:
-            logger.error(f"❌ 서킷 브레이커 체크 중 에러 발생: {e}")
+            logger.exception(f"❌ 서킷 브레이커 체크 중 에러 발생: {e}")
             return True
 
     def _init_dart(self):
@@ -319,7 +316,7 @@ class StrategyEngine:
             self.dart_scorer = DartFinancialScorer(self.dart_api)
             logger.info("✅ DART API 및 재무 분석기 초기화 완료")
         except Exception as e:
-            logger.error(f"⚠️ DART 초기화 실패: {e}")
+            logger.exception(f"⚠️ DART 초기화 실패: {e}")
             self.dart_api = None
             self.dart_scorer = None
 
@@ -341,14 +338,14 @@ class StrategyEngine:
                     self.repo.sync_ohlcv_data(ticker, force_full=force_full_sync)
                     df_hist = self.repo.get_recent_ohlcv(ticker, limit=150)
             except Exception as db_e:
-                logger.error(f"[{name}] DB 동기화 또는 조회 중 오류: {db_e}")
+                logger.exception(f"[{name}] DB 동기화 또는 조회 중 오류: {db_e}")
                 
             if df_hist.empty:
                 try:
                     import FinanceDataReader as fdr
                     df_hist = fdr.DataReader(ticker, start=(datetime.datetime.now() - datetime.timedelta(days=150)).strftime('%Y-%m-%d'))
                 except Exception as fdr_e:
-                    logger.error(f"[{name}] FinanceDataReader 조회 실패: {fdr_e}")
+                    logger.exception(f"[{name}] FinanceDataReader 조회 실패: {fdr_e}")
             
             raw_stocks_data.append((ticker, name, df_hist))
             time.sleep(0.1) # Termux 리소스 방어용 짧은 대기
@@ -489,7 +486,7 @@ class StrategyEngine:
                     api_success = True
                     logger.info(f"{b_name} API로부터 {len(b_holdings)}개의 보유 종목을 조회했습니다.")
             except Exception as e:
-                logger.error(f"{b_name} 보유 종목 API 조회 중 오류: {e}")
+                logger.exception(f"{b_name} 보유 종목 API 조회 중 오류: {e}")
 
             if not api_success:
                 logger.info(f"{b_name} API 조회 실패로 로컬 DB에서 보유 종목을 로드합니다.")
@@ -511,7 +508,7 @@ class StrategyEngine:
                                     "out_of_top_streak": int(row.get("out_of_top_streak") or 0)
                                 })
                 except Exception as db_e:
-                    logger.error(f"{b_name} 로컬 DB 로드 실패: {db_e}")
+                    logger.exception(f"{b_name} 로컬 DB 로드 실패: {db_e}")
 
             # 고점 수익률(max_profit_rate) 병합/갱신 — API 성공 경로에서도 반드시 수행.
             # API 응답에는 max_profit_rate가 없으므로 DB의 고수위(high-water mark)를 병합하지 않으면
@@ -552,7 +549,7 @@ class StrategyEngine:
                             broker_id=b_name
                         )
             except Exception as db_e:
-                logger.error(f"{b_name} 보유 종목 DB 동기화/갱신 중 오류 발생: {db_e}")
+                logger.exception(f"{b_name} 보유 종목 DB 동기화/갱신 중 오류 발생: {db_e}")
 
             holdings.extend(b_holdings)
         return holdings
@@ -694,7 +691,7 @@ class StrategyEngine:
                     if self.repo:
                         df_hist = self.repo.get_recent_ohlcv(ticker, limit=300)
                 except Exception as e:
-                    logger.error(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
+                    logger.exception(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
                 
                 if df_hist.empty:
                     logger.warning(f"⚠️ [{stock['name']}] OHLCV 데이터가 없어 청산 검사를 스킵합니다.")
@@ -757,7 +754,7 @@ class StrategyEngine:
                     try:
                         self.repo.update_out_of_top_streak(b_id, ticker, out_of_top_streak)
                     except Exception as e:
-                        logger.error(f"[{b_id}][{ticker}] out_of_top_streak 갱신 실패: {e}")
+                        logger.exception(f"[{b_id}][{ticker}] out_of_top_streak 갱신 실패: {e}")
             
             s_data = market_map.get(ticker, {})
             rsi_val = s_data.get("rsi", 50.0)
@@ -840,7 +837,7 @@ class StrategyEngine:
                     try:
                         self.repo.set_position_runner(b_id, ticker, True)
                     except Exception as runner_e:
-                        logger.error(f"[{ticker}] 러너 상태 기록 실패: {runner_e}")
+                        logger.exception(f"[{ticker}] 러너 상태 기록 실패: {runner_e}")
                     logger.info(f"📈 [{b_id}][오버슈팅 부분 익절] {stock['name']} {sell_qty}/{quantity}주 익절, 잔여 물량 러너 전환 (RSI {rsi_val:.1f})")
                 else:
                     logger.info(f"📈 [{b_id}][오버슈팅 익절] {stock['name']} RSI {rsi_val:.1f} / BB 상단 도달로 청산")
@@ -929,7 +926,7 @@ class StrategyEngine:
                         "reason": b["reason"]
                     })
         except Exception as e:
-            logger.error(f"시그널 업데이트 중 오류: {e}")
+            logger.exception(f"시그널 업데이트 중 오류: {e}")
 
     def _send_strategy_report(self, scored_stocks, buy_signals, sell_signals, holdings):
         try:
@@ -1008,7 +1005,7 @@ class StrategyEngine:
             if self.publisher:
                 self.publisher.send_message_sync("STRATEGY_REPORT", {"message": msg})
         except Exception as e:
-            logger.error(f"리포트 송신 중 오류: {e}")
+            logger.exception(f"리포트 송신 중 오류: {e}")
 
     def run(self):
         logger.info("==========================================")
@@ -1062,7 +1059,7 @@ class StrategyEngine:
             try:
                 broker = BrokerFactory.get_broker(b_name)
             except Exception as e:
-                logger.error(f"❌ [Reconcile] {b_name} 브로커 초기화 실패: {e}")
+                logger.exception(f"❌ [Reconcile] {b_name} 브로커 초기화 실패: {e}")
                 all_ok = False
                 continue
             result = reconciler.reconcile(b_name, broker, self.repo)
@@ -1086,7 +1083,7 @@ class StrategyEngine:
             try:
                 kodex_df = self.repo.get_recent_ohlcv("069500", limit=300)
             except Exception as e:
-                logger.error(f"KODEX 200 데이터 로드 실패: {e}")
+                logger.exception(f"KODEX 200 데이터 로드 실패: {e}")
             lockout_active = sig.market_lockout(kodex_df, lockout_state, sig_params)
             if lockout_state.get("active") and not lockout_active:
                 if is_hard_stop_lockout(lockout_state) and not self._hard_stop_cooldown_elapsed(lockout_state):
@@ -1125,7 +1122,7 @@ class StrategyEngine:
                     if self.repo:
                         df_hist = self.repo.get_recent_ohlcv(ticker, limit=300)
                 except Exception as e:
-                    logger.error(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
+                    logger.exception(f"[{ticker}] ohlcv 데이터 조회 실패: {e}")
                 
                 if df_hist.empty:
                     continue
@@ -1191,7 +1188,7 @@ class StrategyEngine:
                             self.repo.clear_stopped_position(ticker, self.profile)
                             logger.info(f"🔓 [{ticker}] 재진입 확정으로 쿨다운 기록 해제 (stopped_positions 삭제)")
                         except Exception as clear_e:
-                            logger.error(f"[{ticker}] 쿨다운 기록 해제 실패: {clear_e}")
+                            logger.exception(f"[{ticker}] 쿨다운 기록 해제 실패: {clear_e}")
         return buy_signals
 
     def _check_hard_stop_lockout(self) -> bool:
@@ -1204,7 +1201,7 @@ class StrategyEngine:
         try:
             state = self.repo.get_market_lockout()
         except Exception as e:
-            logger.error(f"❌ 락아웃 상태 조회 실패 (안전을 위해 매수 차단): {e}")
+            logger.exception(f"❌ 락아웃 상태 조회 실패 (안전을 위해 매수 차단): {e}")
             return True
         if not is_hard_stop_lockout(state):
             return False

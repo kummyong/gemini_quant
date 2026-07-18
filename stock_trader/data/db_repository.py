@@ -42,7 +42,7 @@ class DbRepository:
             conn.commit()
         except Exception as e:
             conn.rollback()
-            logger.error(f"❌ 데이터베이스 트랜잭션 에러: {e}")
+            logger.exception(f"❌ 데이터베이스 트랜잭션 에러: {e}")
             raise e
         finally:
             conn.close()
@@ -580,6 +580,15 @@ class DbRepository:
                 "INSERT INTO account_summary (total_assets, cash, cash_ratio) VALUES (?, ?, ?)",
                 (total_assets, cash, cash_ratio))
 
+    def get_latest_account_summary(self):
+        """가장 최근 계좌 스냅샷 조회 (브로커 API 실패 시 폴백용). 없으면 None."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT total_assets, cash FROM account_summary ORDER BY id DESC LIMIT 1")
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     def get_trades_on_date(self, date_str: str) -> list:
         """지정 날짜(YYYY-MM-DD)의 체결 이력 조회"""
         with self.get_connection() as conn:
@@ -658,7 +667,7 @@ class DbRepository:
                             change = excluded.change
                     """, (ticker, date_str, _open, _high, _low, _close, _volume, _change))
         except Exception as e:
-            logger.error(f"[{ticker}] OHLCV 동기화 중 오류: {e}")
+            logger.exception(f"[{ticker}] OHLCV 동기화 중 오류: {e}")
 
     def get_recent_ohlcv(self, ticker: str, limit: int = 300):
         """DB에서 가장 최신 OHLCV 데이터를 Pandas DataFrame으로 반환합니다."""
