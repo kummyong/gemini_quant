@@ -34,6 +34,7 @@ venv.bak/
 *.json
 *.txt
 !requirements.txt
+!stock_trader/data/intent_train_data.json
 *.db
 *.log
 *.lock

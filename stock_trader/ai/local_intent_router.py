@@ -1,12 +1,15 @@
 import os
 import joblib
 import re
+import logging
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 import numpy as np
 
 from stock_trader.config import MODEL_PATH
+
+logger = logging.getLogger("LocalIntentRouter")
 
 # 초기 학습 데이터 (함수 호출 매핑)
 # 라벨: get_account_summary, get_balance, place_order, search_history, get_system_status, get_stock_price, switch_ai_model
@@ -18,7 +21,10 @@ _DATA_PATH = os.path.join(PROJECT_DIR, 'stock_trader', 'data', 'intent_train_dat
 try:
     with open(_DATA_PATH, 'r', encoding='utf-8') as f:
         TRAIN_DATA = json.load(f)
-except FileNotFoundError:
+except Exception as e:
+    # 조용히 빈 리스트로 넘어가면 이후 모델 학습이 실패했다는 사실이 드러나지 않는다.
+    # 이 파일이 없으면 로컬 인텐트 분류기 전체가 무력화되므로 반드시 로그를 남긴다.
+    logger.error(f"❌ 학습 데이터 로드 실패 ({_DATA_PATH}): {e} — TRAIN_DATA를 빈 리스트로 대체합니다.")
     TRAIN_DATA = []
 
 
@@ -36,6 +42,17 @@ class LocalIntentRouter:
                 self.model = joblib.load(MODEL_PATH)
                 return
             except: pass
+
+        if not TRAIN_DATA:
+            # TRAIN_DATA가 비어있으면(파일 누락 등) 여기서 크래시시키지 않는다 —
+            # router는 모듈 임포트 시점에 즉시 생성되므로, 여기서 예외가 나면
+            # telegram_listener 프로세스 자체가 뜨지 못하고 워치독이 무한 재시작 루프에 빠진다.
+            # 모델 없이 두면 predict_top_n이 confidence 0으로 응답해, 상위 폴백
+            # (DB 유사매칭 / Gemini)이 정상적으로 이어받는다.
+            logger.critical("🚨 TRAIN_DATA가 비어있어 로컬 인텐트 모델을 학습할 수 없습니다. "
+                             "로컬 분류기는 비활성화되고 상위 폴백(Gemini 등)에만 의존합니다.")
+            self.model = None
+            return
 
         self.model = Pipeline([
             ('tfidf', TfidfVectorizer(min_df=1)),
@@ -93,6 +110,9 @@ class LocalIntentRouter:
 
     def predict_top_n(self, text: str, n: int = 3):
         """확신도 기준 상위 N개의 인텐트와 확률 리스트 반환"""
+        if self.model is None:
+            # 학습 데이터 부재로 모델이 없는 상태 — confidence 0으로 응답해 상위 폴백으로 넘긴다.
+            return [("UNKNOWN", 0.0)] * max(1, n)
         probs = self.model.predict_proba([text])[0]
         classes = self.model.classes_
         

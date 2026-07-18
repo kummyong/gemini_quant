@@ -24,8 +24,12 @@ logger = logging.getLogger("TrainerNLP")
 def retrain_model():
     """SQLite DB의 training_data 피드백 데이터를 반영하여 로컬 NLP 인텐트 모델을 재학습합니다."""
     logger.info("[NLP Retrain] 모델 재학습 시작...")
-    
+
     # 1. 기본 학습 데이터 로드
+    if not TRAIN_DATA:
+        logger.error("[NLP Retrain] TRAIN_DATA가 비어있어 재학습을 건너뜁니다 "
+                     "(intent_train_data.json 누락 여부를 확인하세요).")
+        return
     texts, labels = zip(*TRAIN_DATA)
     texts = list(texts)
     labels = list(labels)
