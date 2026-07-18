@@ -7,6 +7,9 @@ sys.path.append("/usr/local/lib/python3.13/dist-packages")
 
 import subprocess
 import time
+import shutil
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from stock_trader.communication.telegram_utils import send_telegram_message
 
@@ -28,12 +31,47 @@ PROCESSES = [
     {"path": "stock_trader/communication/notification_gateway.py", "name": "알림 게이트웨이", "cwd": BASE_DIR},
 ]
 
+# 서브프로세스 stdout/stderr 리다이렉트 로그 회전 설정 (copytruncate 방식)
+SUBPROC_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+SUBPROC_LOG_CHECK_INTERVAL = 60  # 메인 루프 60회(약 10분)마다 크기 체크
+
+_watchdog_logger = None
+
+def _get_watchdog_logger():
+    """워치독 자신의 로그. 다른 모듈들과 동일하게 RotatingFileHandler로 무한 증가를 방지한다
+    (기존엔 raw open(...,'a')로 계속 append만 해서 파일이 무한정 커질 수 있었음)."""
+    global _watchdog_logger
+    if _watchdog_logger is None:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        _watchdog_logger = logging.getLogger("UnifiedWatchdog")
+        _watchdog_logger.setLevel(logging.INFO)
+        handler = RotatingFileHandler(
+            os.path.join(LOG_DIR, "unified_watchdog.log"),
+            maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        _watchdog_logger.addHandler(handler)
+        _watchdog_logger.propagate = False
+    return _watchdog_logger
+
 def log(msg):
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     full_msg = f"[{now}] {msg}"
     print(full_msg)
-    with open(os.path.join(LOG_DIR, "unified_watchdog.log"), "a") as f:
-        f.write(full_msg + "\n")
+    _get_watchdog_logger().info(full_msg)
+
+def rotate_subprocess_log_if_large(path: str):
+    """subprocess가 O_APPEND로 열어둔 stdout/stderr 로그는 부모 프로세스가 파일 핸들을
+    바꿔치기해도 자식은 여전히 옛 fd에 쓰기 때문에 RotatingFileHandler를 쓸 수 없다.
+    logrotate의 copytruncate와 동일한 방식(내용을 백업으로 복사 후 같은 경로를 0바이트로
+    truncate)을 쓰면, O_APPEND 모드의 자식 프로세스가 재시작 없이도 이어서 정상 기록한다."""
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > SUBPROC_LOG_MAX_BYTES:
+            shutil.copyfile(path, path + ".1")
+            with open(path, "r+b") as f:
+                f.truncate(0)
+    except Exception as e:
+        log(f"⚠️ 서브프로세스 로그 회전 실패 ({path}): {e}")
 
 def run_watchdog():
     log(f"🚀 통합 워치독 감시 시작... (Python: {VENV_PYTHON})")
@@ -56,8 +94,18 @@ def run_watchdog():
     ]
     env["PYTHONPATH"] = ":".join(system_paths)
 
+    loop_count = 0
+
     while True:
         now = datetime.now(KST)
+        loop_count += 1
+
+        # [로그 회전] 서브프로세스 stdout/stderr 리다이렉트 파일이 무한정 커지지 않도록 주기적으로 점검
+        if loop_count % SUBPROC_LOG_CHECK_INTERVAL == 0:
+            for p_info in PROCESSES:
+                safe_name = p_info["name"].replace(' ', '_')
+                rotate_subprocess_log_if_large(os.path.join(LOG_DIR, f"{safe_name}_stdout.log"))
+                rotate_subprocess_log_if_large(os.path.join(LOG_DIR, f"{safe_name}_stderr.log"))
         
         from stock_trader.core.korean_market_calendar import is_market_holiday
         is_today_holiday = is_market_holiday(now)

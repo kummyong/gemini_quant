@@ -5,7 +5,7 @@ import logging
 import pytz
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from stock_trader.communication.telegram_utils import send_telegram_message
 
 # 1. 경로 및 시간 설정
@@ -98,21 +98,35 @@ def load_market_halt():
         logger.warning(f"⚠️ market_lockout DB 조회 실패: {e}")
 
 def get_cached_atr_pct(ticker: str) -> float:
-    """종목의 14일 ATR% 값을 계산하고 당일 기준으로 캐시합니다."""
+    """종목의 14일 ATR% 값을 계산하고 당일 기준으로 캐시합니다.
+    인메모리 캐시(ATR_CACHE)는 프로세스 재시작 시 사라지므로, DB(atr_cache 테이블)에도
+    영속 저장해 워치독 재시작 직후에도 당일 재계산 없이 즉시 읽어올 수 있게 한다."""
     today = datetime.now(KST).strftime('%Y-%m-%d')
     cached = ATR_CACHE.get(ticker)
     if cached and cached[0] == today:
         return cached[1]
+
+    try:
+        db_cached = get_repo().get_atr_value(ticker, today)
+        if db_cached is not None:
+            ATR_CACHE[ticker] = (today, db_cached)
+            return db_cached
+    except Exception as e:
+        logger.warning(f"⚠️ ATR DB 캐시 조회 실패 ({ticker}): {e}")
+
     try:
         import pandas as pd
         repo = get_repo()
         df = repo.get_recent_ohlcv(ticker, limit=40)
-        
+
         if df.empty or len(df) < 15:
+            # (주의) datetime/timedelta는 파일 상단에서만 import할 것 — 함수 내부에서 다시
+            # import하면 그 순간부터 함수 전체에서 해당 이름이 지역 변수로 취급되어,
+            # 이 분기보다 앞서 나온 `datetime.now(KST)` 참조가 UnboundLocalError로 깨진다
+            # (실제로 이 버그가 있었고, 트레일링 스탑 판정이 조용히 실패하고 있었음).
             import FinanceDataReader as fdr
-            from datetime import datetime, timedelta
             df = fdr.DataReader(ticker, start=(datetime.now(KST) - timedelta(days=40)).strftime('%Y-%m-%d'))
-            
+
         if not df.empty and len(df) >= 15:
             closes = df['Close']
             highs = df['High']
@@ -121,33 +135,80 @@ def get_cached_atr_pct(ticker: str) -> float:
             atr = tr.rolling(window=14).mean().iloc[-1]
             atr_pct = (atr / closes.iloc[-1]) * 100
             ATR_CACHE[ticker] = (today, atr_pct)
+            try:
+                get_repo().save_atr_value(ticker, today, atr_pct)
+            except Exception as db_e:
+                logger.warning(f"⚠️ ATR DB 캐시 저장 실패 ({ticker}): {db_e}")
             logger.info(f"📋 Cached ATR for {ticker} (using DB/FDR): {atr_pct:.2f}%")
             return atr_pct
     except Exception as e:
         logger.warning(f"⚠️ ATR 계산 실패 ({ticker}): {e}")
     return 3.0  # 기본값
 
-def get_intraday_market_indices() -> dict:
-    """네이버 금융의 실시간 지수 API를 호출하여 코스피/코스닥 당일 변동률을 리턴합니다. (REST API 제한 우회)"""
+def _get_intraday_indices_naver() -> dict:
+    """네이버 금융의 실시간 지수 폴링 API 호출 (1차 소스, 진짜 장중 실시간)."""
     import requests
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
+    res = requests.get(url, headers=headers, timeout=5)
+    if res.status_code != 200:
+        return {}
+    data = res.json()
+    result = {}
+    for item in data.get("result", {}).get("areas", []):
+        for index_data in item.get("datas", []):
+            code = index_data.get("cd")  # 'KOSPI' or 'KOSDAQ'
+            rate_str = index_data.get("cr", "0.0")  # 'cr'이 변동률 문자열
+            try:
+                result[code] = float(rate_str)
+            except ValueError:
+                pass
+    return result
+
+
+def _get_intraday_indices_fdr() -> dict:
+    """FinanceDataReader 폴백 (2차 소스). 네이버 비공식 API가 막히거나 구조가 바뀌었을 때 대비.
+    FDR의 최신 행이 '오늘' 날짜가 아니면(주말/데이터 지연 등) 장중 실시간이 아니므로
+    신뢰할 수 없다고 보고 빈 dict를 반환한다 — 오래된 등락률을 오늘 것처럼 잘못 판단하면
+    서킷브레이커가 엉뚱하게 발동하거나 반대로 놓칠 수 있다."""
+    import FinanceDataReader as fdr
+    today_str = datetime.now(KST).strftime('%Y-%m-%d')
+    result = {}
+    for code, label in [("KS11", "KOSPI"), ("KQ11", "KOSDAQ")]:
+        try:
+            df = fdr.DataReader(code)
+            if df.empty:
+                continue
+            last_date = df.index[-1].strftime('%Y-%m-%d')
+            if last_date != today_str:
+                logger.warning(f"⚠️ FDR {label} 최신 데이터가 오늘({today_str})이 아님(마지막: {last_date}) — 폴백에서 제외")
+                continue
+            result[label] = float(df['Change'].iloc[-1]) * 100.0
+        except Exception as e:
+            logger.warning(f"⚠️ FDR {label} 지수 조회 실패: {e}")
+    return result
+
+
+def get_intraday_market_indices() -> dict:
+    """코스피/코스닥 당일 변동률을 조회합니다. 네이버 실시간 API를 우선 시도하고,
+    실패하면(구조 변경, 일시 장애 등) FinanceDataReader로 폴백합니다.
+    두 소스 모두 실패하면 빈 dict를 반환하며, 호출부는 이번 주기의 서킷브레이커
+    체크를 건너뛰고 다음 주기에 재시도한다(단일 장애점으로 인한 무한 정지 방지)."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            result = {}
-            for item in data.get("result", {}).get("areas", []):
-                for index_data in item.get("datas", []):
-                    code = index_data.get("cd")  # 'KOSPI' or 'KOSDAQ'
-                    rate_str = index_data.get("cr", "0.0")  # 'cr'이 변동률 문자열
-                    try:
-                        result[code] = float(rate_str)
-                    except ValueError:
-                        pass
+        result = _get_intraday_indices_naver()
+        if result:
+            return result
+        logger.warning("⚠️ 네이버 실시간 지수 응답이 비어있어 FDR로 폴백합니다.")
+    except Exception as e:
+        logger.warning(f"⚠️ 네이버 실시간 지수 조회 실패: {e} — FDR로 폴백합니다.")
+
+    try:
+        result = _get_intraday_indices_fdr()
+        if result:
             return result
     except Exception as e:
-        logger.warning(f"⚠️ 네이버 실시간 지수 조회 실패: {e}")
+        logger.warning(f"⚠️ FDR 지수 폴백 실패: {e}")
+
     return {}
 
 def monitor_holdings_and_stops():

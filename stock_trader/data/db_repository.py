@@ -245,6 +245,16 @@ class DbRepository:
             )
             """)
 
+            # 9-b. atr_cache (종목별 일일 ATR% 영속 캐시 — 프로세스 재시작 시에도 당일 값 유지)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS atr_cache (
+                ticker TEXT NOT NULL,
+                calc_date TEXT NOT NULL,
+                atr_pct REAL,
+                PRIMARY KEY (ticker, calc_date)
+            )
+            """)
+
             # 10. stopped_positions (샹들리에 스탑 청산된 포지션 관리 - 쿨다운용)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS stopped_positions (
@@ -664,6 +674,24 @@ class DbRepository:
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
             return df
+
+    def get_atr_value(self, ticker: str, calc_date: str):
+        """당일자로 이미 계산된 ATR%가 있으면 반환 (없으면 None) — 프로세스 재시작 후에도
+        같은 날짜의 계산을 반복하지 않기 위한 영속 캐시 조회."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT atr_pct FROM atr_cache WHERE ticker = ? AND calc_date = ?", (ticker, calc_date))
+            row = cursor.fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+
+    def save_atr_value(self, ticker: str, calc_date: str, atr_pct: float):
+        """종목의 당일자 ATR% 계산 결과를 저장합니다 (upsert)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO atr_cache (ticker, calc_date, atr_pct) VALUES (?, ?, ?)
+                ON CONFLICT(ticker, calc_date) DO UPDATE SET atr_pct = excluded.atr_pct
+            """, (ticker, calc_date, atr_pct))
 
     def save_stopped_position(self, ticker: str, stop_date: str, stop_price: float, profile: str):
         """스탑 청산된 포지션을 저장합니다 (쿨다운 추적용)."""
