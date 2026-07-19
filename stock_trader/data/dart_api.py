@@ -220,17 +220,18 @@ class DartAPI:
     
     # ─── 공시 검색 API ───
     
-    def search_disclosures(self, bgn_de: str, end_de: str, corp_code: str = "", corp_cls: str = "Y", page_count: int = 100) -> list:
+    def search_disclosures(self, bgn_de: str, end_de: str, corp_code: str = "", corp_cls: str = "Y", page_count: int = 100, page_no: int = 1) -> list:
         """
         공시 검색 (특정 기간의 공시 목록 조회).
-        
+
         Args:
             bgn_de: 시작일 (YYYYMMDD)
             end_de: 종료일 (YYYYMMDD)
             corp_code: 특정 회사 고유번호 (빈 문자열이면 전체)
             corp_cls: "Y"=유가증권, "K"=코스닥, "N"=코넥스, "E"=기타
             page_count: 한 페이지 결과 수 (최대 100)
-        
+            page_no: 페이지 번호 (1부터)
+
         Returns:
             list of dict: 공시 목록. corp_name, report_nm, rcept_dt, rcept_no 등 포함.
         """
@@ -239,14 +240,70 @@ class DartAPI:
             "end_de": end_de,
             "corp_cls": corp_cls,
             "page_count": str(page_count),
+            "page_no": str(page_no),
             "sort": "date",
             "sort_mth": "desc"
         }
         if corp_code:
             params["corp_code"] = corp_code
-        
+
         data = self._request("list.json", params)
         return data.get("list", [])
+
+    def search_disclosures_all(self, bgn_de: str, end_de: str, corp_cls: str = "Y", max_pages: int = 20) -> list:
+        """공시 검색을 total_page 기준으로 전 페이지 순회하여 합친다.
+        활황장에는 하루 공시가 수백 건이라 1페이지(최대 100건)만 보면 뒷 페이지의
+        보고서를 통째로 놓친다. max_pages는 폭주 방어용 상한."""
+        params = {
+            "bgn_de": bgn_de, "end_de": end_de, "corp_cls": corp_cls,
+            "page_count": "100", "page_no": "1", "sort": "date", "sort_mth": "desc"
+        }
+        data = self._request("list.json", params)
+        results = list(data.get("list", []))
+        try:
+            total_page = int(data.get("total_page", 1))
+        except (TypeError, ValueError):
+            total_page = 1
+
+        for page in range(2, min(total_page, max_pages) + 1):
+            params["page_no"] = str(page)
+            page_data = self._request("list.json", params)
+            page_list = page_data.get("list", [])
+            if not page_list:
+                break
+            results.extend(page_list)
+            time.sleep(0.2)
+        return results
+
+    def get_document_text(self, rcept_no: str) -> str:
+        """공시 원문(document.xml)을 내려받아 텍스트로 반환한다. 실패 시 빈 문자열.
+        elestock.json에는 취득방법(장내매수/스톡옵션 등) 필드가 없어서,
+        장내매수 여부는 보고서 원문 텍스트에서만 확인할 수 있다."""
+        if not rcept_no:
+            return ""
+        try:
+            res = requests.get(f"{self.BASE_URL}/document.xml",
+                               params={"crtfc_key": self.api_key, "rcept_no": rcept_no}, timeout=30)
+            if res.status_code != 200:
+                logger.warning(f"⚠️ DART 원문 조회 HTTP 오류: {res.status_code} (rcept_no={rcept_no})")
+                return ""
+            with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+                names = z.namelist()
+                if not names:
+                    return ""
+                raw = z.read(names[0])
+            for enc in ("utf-8", "cp949"):
+                try:
+                    return raw.decode(enc)
+                except UnicodeDecodeError:
+                    continue
+            return raw.decode("utf-8", errors="ignore")
+        except zipfile.BadZipFile:
+            logger.warning(f"⚠️ DART 원문 응답이 ZIP이 아님 (rcept_no={rcept_no}) — 오류 응답 가능성")
+            return ""
+        except Exception as e:
+            logger.warning(f"⚠️ DART 원문 조회 실패 (rcept_no={rcept_no}): {e}")
+            return ""
     
     # ─── 최대주주 API ───
     
