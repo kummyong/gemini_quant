@@ -49,7 +49,8 @@ def main():
         tickers=universe,
         start_date=start_date,
         end_date=end_date,
-        initial_capital=100_000_000.0 # 1억 원
+        initial_capital=100_000_000.0, # 1억 원
+        min_hold_days=7
     )
     
     bt.run()
