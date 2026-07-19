@@ -599,7 +599,7 @@ class DbRepository:
         with self.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id, features FROM trade_signals WHERE status = 'PENDING'")
+            cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id, features, created_at FROM trade_signals WHERE status = 'PENDING'")
             return [dict(row) for row in cursor.fetchall()]
 
     def complete_signal(self, signal_id: int):

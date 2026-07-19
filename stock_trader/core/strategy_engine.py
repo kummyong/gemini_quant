@@ -70,8 +70,10 @@ class StrategyEngine:
     TRAILING_STOP_DROP = 3.0
     HARD_STOP_LOSS = -5.0
 
-    from stock_trader.core.stock_universe import SAMPLE_TICKERS
-    SAMPLE_DATA = SAMPLE_TICKERS
+    # 테스트/외부에서 유니버스를 강제 지정할 때만 사용하는 클래스 레벨 오버라이드.
+    # None이면 __init__에서 get_dynamic_universe()로 실행 시점에 동적 조회한다
+    # (fetch_market_data도 이 값이 진리값일 때만 우선 사용 — line 357 참조).
+    SAMPLE_DATA = None
 
     def __init__(self, db_repository: DbRepository = None, ipc_publisher: IpcPublisher = None):
         logger.info("중장기 전략 엔진(Strategy Engine) 초기화 중 (다중 증권사 지원)...")
@@ -79,6 +81,9 @@ class StrategyEngine:
         self.publisher = ipc_publisher
         self.is_system_locked = False
         self.lock_reason = ""
+        # 시장 국면 기본값 — check_market_circuit_breaker 실행 전에
+        # generate_management_signals가 호출되어도(테스트 등) 깨지지 않도록 선초기화
+        self.market_regime = "NEUTRAL"
         
         self.profile = ACTIVE_STRATEGY_PROFILE
         if self.profile == ETF_TREND:
@@ -88,8 +93,9 @@ class StrategyEngine:
             if StrategyEngine.SAMPLE_DATA:
                 self.SAMPLE_DATA = StrategyEngine.SAMPLE_DATA
             else:
-                from stock_trader.core.stock_universe import SAMPLE_TICKERS
-                self.SAMPLE_DATA = SAMPLE_TICKERS
+                # 실행 시점에 KOSPI 시총 Top 30을 동적 조회 (실패 시 내부에서 정적 폴백)
+                from stock_trader.core.stock_universe import get_dynamic_universe
+                self.SAMPLE_DATA = get_dynamic_universe(30)
             logger.info(f"💼 [STOCK_MULTIFACTOR] 프로파일 로드됨. 유니버스 크기: {len(self.SAMPLE_DATA)}")
 
         self.naver = NaverFinanceProvider()
@@ -253,6 +259,14 @@ class StrategyEngine:
             self.market_regime = macro_provider.fetch_market_regime()
             if hasattr(self, 'risk_manager'):
                 self.risk_manager.set_market_regime(self.market_regime)
+            # auto_trader의 실시간 스탑 감시가 같은 국면 기준을 쓰도록 DB에 영속화
+            # (이중 기준 불일치 방지: BULL 이완 트레일링을 실시간 감시가 8% 캡으로 덮어버리면 안 됨)
+            if self.repo:
+                try:
+                    regime_code = {"BULL": 1.0, "BEAR": -1.0}.get(self.market_regime, 0.0)
+                    self.repo.upsert_hyperparam("MARKET_REGIME_CODE", regime_code)
+                except Exception as regime_e:
+                    logger.warning(f"⚠️ 시장 국면 DB 영속화 실패: {regime_e}")
         except Exception as e:
             logger.error(f"거시 지표 수집 실패: {e}")
             self.vix_disparity = 0.0

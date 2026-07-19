@@ -39,7 +39,19 @@ HYPERPARAM_DEFAULTS = {
     "TRAILING_MIN_DROP": 2.0,
     "TRAILING_MAX_DROP": 8.0,
     "MAX_CHASE_PCT": 2.0,         # 14:30 이후 마감 집행 시 목표가 대비 추격 허용 폭(%)
+    "MARKET_REGIME_CODE": 0.0,    # 전략 엔진이 기록한 시장 국면 (1=BULL, 0=NEUTRAL, -1=BEAR)
 }
+
+# 종가 베팅(15:00 신호 생성) 체제에서 당일 미체결 신호가 다음날 아침 스테일 가격으로
+# 집행되는 것을 막는 신선도 한도 (시간)
+SIGNAL_MAX_AGE_HOURS = 4.0
+
+def _regime_from_code(code: float) -> str:
+    if code >= 0.5:
+        return "BULL"
+    if code <= -0.5:
+        return "BEAR"
+    return "NEUTRAL"
 
 def get_repo() -> DbRepository:
     global _REPO
@@ -275,12 +287,20 @@ def monitor_holdings_and_stops():
                     trigger_realtime_sell(b_name, api, ticker, name, qty, f"실시간 Hard Stop Loss 작동 (수익률: {profit:.2f}%)", json.dumps(sell_feat, ensure_ascii=False), est_price=current_price)
                     continue
 
-                # 3. Trailing Stop (Chandelier Exit) 판정
+                # 3. Trailing Stop (Chandelier Exit) 판정 — 전략 엔진과 동일한 RiskManager 기준 사용.
+                # 엔진이 DB에 기록한 시장 국면(MARKET_REGIME_CODE)을 반영해 BULL 이완/BEAR 타이트가
+                # 실시간 감시에도 일관되게 적용된다 (이중 기준 불일치 방지).
                 if new_max >= 2.0:
                     hp = get_hyperparams()
                     atr_pct = get_cached_atr_pct(ticker)
-                    # Chandelier Exit: 고점 수익률 대비 ATR×배수 하락 시 청산 (하한/상한은 하이퍼파라미터)
-                    stop_threshold = max(hp["TRAILING_MIN_DROP"], min(hp["TRAILING_MAX_DROP"], hp["CHANDELIER_ATR_MULT"] * atr_pct))
+                    from stock_trader.core.risk_manager import RiskManager
+                    rm = RiskManager(
+                        trailing_min_drop=hp["TRAILING_MIN_DROP"],
+                        trailing_max_drop=hp["TRAILING_MAX_DROP"],
+                        chandelier_atr_mult=hp["CHANDELIER_ATR_MULT"],
+                        market_regime=_regime_from_code(hp["MARKET_REGIME_CODE"]),
+                    )
+                    _, stop_threshold = rm.calculate_stops(atr_pct)
                     
                     if (new_max - profit) >= stop_threshold:
                         logger.warning(f"🎯 [트레일링스탑] {name} Chandelier Exit 작동! (고점: {new_max:.2f}%, 현재: {profit:.2f}%, 하락폭: {new_max-profit:.2f}%, 기준: {stop_threshold:.2f}%) 즉시 전량 청산합니다.")
@@ -575,6 +595,18 @@ def run_trade():
                             if market_halt:
                                 logger.warning(f"⏭️ [매수 보류] {sig['name']}: 시장 서킷 브레이커 작동 중으로 매수 스킵")
                                 continue
+
+                            # 신호 신선도 검사: 종가 베팅(15:00) 신호가 당일 장 마감까지 체결되지 못하고
+                            # 다음날 아침 시가에 스테일 가격으로 집행되는 것을 방지
+                            try:
+                                created_at = datetime.strptime(str(sig['created_at'])[:19], "%Y-%m-%d %H:%M:%S")
+                                age_hours = (now.replace(tzinfo=None) - created_at).total_seconds() / 3600.0
+                                if age_hours > SIGNAL_MAX_AGE_HOURS:
+                                    logger.warning(f"⏭️ [신호 만료] {sig['name']}: 생성 후 {age_hours:.1f}시간 경과 (한도 {SIGNAL_MAX_AGE_HOURS}h) — 매수 취소")
+                                    get_repo().cancel_signal(sig['id'], f"신선도 만료 ({age_hours:.1f}h)")
+                                    continue
+                            except (KeyError, IndexError, ValueError, TypeError):
+                                pass  # created_at 파싱 불가 시 기존 동작 유지
                                 
                             # 스마트 분할 매수 / 눌림목 대기 로직 적용
                             try:

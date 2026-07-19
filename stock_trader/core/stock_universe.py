@@ -44,10 +44,30 @@ STOCK_MAP = {
     "진에어": "272450", "대한항공": "003490", "아시아나": "020560",
 }
 
+# 동적 유니버스 조회 실패 시 폴백용 정적 리스트 (ticker, name).
+# 네트워크/FDR 장애로 유니버스가 빈 리스트가 되면 그날 매매가 조용히 중단되므로,
+# 실패 시에는 반드시 이 리스트로 폴백한다.
+FALLBACK_TICKERS = [
+    ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"),
+    ("035420", "NAVER"), ("035720", "카카오"), ("000270", "기아"),
+    ("005490", "POSCO홀딩스"), ("105560", "KB금융"), ("068270", "셀트리온"),
+    ("000810", "삼성화재"), ("051910", "LG화학"), ("032830", "삼성생명"),
+    ("015760", "한국전력"), ("033780", "KT&G"), ("003550", "LG"),
+    ("000100", "유한양행"), ("373220", "LG에너지솔루션"), ("207940", "삼성바이오로직스"),
+    ("055550", "신한지주"), ("012330", "현대모비스"), ("066570", "LG전자"),
+    ("028260", "삼성물산"),
+]
+
+import logging
+_logger = logging.getLogger("StockUniverse")
+
+
 def get_dynamic_universe(top_n=30):
     """
     실시간으로 KOSPI 시가총액 상위 종목을 추출하여 반환합니다.
-    (우선주, 스팩, 리츠 제외)
+    (우선주, 스팩, 리츠 제외) 조회 실패 시 FALLBACK_TICKERS를 반환합니다.
+
+    주의: 네트워크 호출이므로 모듈 import 시점이 아니라 전략 실행 시점에 호출할 것.
     """
     try:
         import FinanceDataReader as fdr
@@ -56,19 +76,23 @@ def get_dynamic_universe(top_n=30):
         df = df[df['Code'].str.endswith('0')]
         # 스팩, 리츠 제외
         df = df[~df['Name'].str.contains('스팩|리츠')]
-        
+
         df_sorted = df.sort_values(by='Marcap', ascending=False).head(top_n)
-        
+
         tickers = []
         for _, row in df_sorted.iterrows():
             ticker, name = row['Code'], row['Name']
             tickers.append((ticker, name))
             STOCK_MAP[name] = ticker # STOCK_MAP에도 동적 추가
-            
+
+        if not tickers:
+            raise ValueError("동적 유니버스 결과가 비어있음")
         return tickers
     except Exception as e:
-        print(f"Dynamic universe fetch failed: {e}")
-        return []
+        _logger.warning(f"⚠️ 동적 유니버스 조회 실패 — 정적 폴백 리스트({len(FALLBACK_TICKERS)}종목) 사용: {e}")
+        return list(FALLBACK_TICKERS)
 
-# 전략 엔진용 타겟 종목 리스트 (실시간 Top 30 자동 추출)
-SAMPLE_TICKERS = get_dynamic_universe(30)
+# 전략 엔진용 타겟 종목 리스트.
+# import 시점에는 네트워크를 타지 않는 정적 리스트를 노출하고,
+# 실시간 Top 30은 StrategyEngine이 실행 시점에 get_dynamic_universe()로 갱신한다.
+SAMPLE_TICKERS = list(FALLBACK_TICKERS)

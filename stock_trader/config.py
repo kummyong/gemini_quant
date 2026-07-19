@@ -46,8 +46,9 @@ ENABLE_SECTOR_FLOW_BLEND = os.environ.get("ENABLE_SECTOR_FLOW_BLEND", "false").l
 ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "true").lower() == "true"
 
 # 센티먼트/미시구조 보너스 (토론방 트래픽, 체결강도, 호가잔량) — 수급 계열과 분리된 플래그.
-# 현재 신호 정의에 시점 불일치가 있어(08:30 개장 전 실행 vs 장중 실시간 지표) 재설계 전까지 비활성화.
-ENABLE_SENTIMENT_MICRO_BONUS = os.environ.get("ENABLE_SENTIMENT_MICRO_BONUS", "false").lower() == "true"
+# 전략 실행이 종가 베팅(15:00)으로 이동하면서 장중 실시간 지표와 시점이 일치하게 되어 활성화.
+# (08:30 개장 전 체제로 되돌릴 경우 반드시 다시 꺼야 함 — 개장 전 호가잔량/당일 게시글 수는 무의미)
+ENABLE_SENTIMENT_MICRO_BONUS = os.environ.get("ENABLE_SENTIMENT_MICRO_BONUS", "true").lower() == "true"
 
 # ETF 유니버스 리스트 (ticker, name)
 ETF_UNIVERSE = [

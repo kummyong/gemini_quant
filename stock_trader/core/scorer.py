@@ -178,9 +178,10 @@ class MultiFactorScorer:
 
                 final_score += min(SMART_MONEY_BONUS_CAP, smart_money_bonus)
 
-            # 센티먼트/미시구조 보너스 — 종가 매매(15:00)로 스케줄이 변경되었으므로
-            # 장중 실시간 지표(호가잔량/체결강도/당일 게시글 수)를 적극 반영한다.
-            if getattr(trader_config, 'ENABLE_SENTIMENT_MICRO_BONUS', True):
+            # 센티먼트/미시구조 보너스 — 종가 매매(15:00)로 스케줄이 변경되어
+            # 장중 실시간 지표(호가잔량/체결강도/당일 게시글 수)를 반영한다.
+            # 활성화 여부는 config.ENABLE_SENTIMENT_MICRO_BONUS가 단일 진실 소스.
+            if getattr(trader_config, 'ENABLE_SENTIMENT_MICRO_BONUS', False):
                 # 4. 종목토론방 센티먼트 (조용한 매집 vs 개인 쏠림)
                 if "discussion_traffic" in stock:
                     traffic = stock["discussion_traffic"]
