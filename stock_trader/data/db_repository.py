@@ -333,6 +333,20 @@ class DbRepository:
             )
             """)
 
+            # 14. insider_buying_events (대주주/내부자 장내매수 이력)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS insider_buying_events (
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                title TEXT,
+                reporter TEXT,
+                reason TEXT,
+                amount INTEGER,
+                created_at DATETIME DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (ticker, date, reporter)
+            )
+            """)
+
             # --- 인덱스 설정 최적화 ---
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks (status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time ON scheduled_tasks (scheduled_at)")
@@ -802,6 +816,25 @@ class DbRepository:
                     inds_nm = excluded.inds_nm, cur_prc = excluded.cur_prc, flu_rt = excluded.flu_rt,
                     rising = excluded.rising, stdns = excluded.stdns, fall = excluded.fall
             """, (date, inds_cd, inds_nm, cur_prc, flu_rt, rising, stdns, fall))
+
+    def save_insider_buying(self, ticker: str, date: str, title: str, reporter: str, reason: str, amount: int):
+        """내부자 장내매수 내역을 저장합니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO insider_buying_events (ticker, date, title, reporter, reason, amount)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (ticker, date, title, reporter, reason, amount))
+
+    def get_recent_insider_buying_tickers(self, days: int = 5) -> set:
+        """최근 N일 내 내부자 장내매수가 있었던 종목의 티커 집합(set)을 반환합니다."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT ticker FROM insider_buying_events 
+                WHERE date >= date('now', 'localtime', ?)
+            """, (f'-{days} days',))
+            return {row[0] for row in cursor.fetchall()}
 
     def get_sector_flow_history(self, inds_cd: str, days: int = 90) -> list:
         """특정 업종코드의 최근 N일 투자자 순매수 이력을 날짜 오름차순으로 반환합니다."""

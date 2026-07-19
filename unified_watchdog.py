@@ -84,6 +84,7 @@ def run_watchdog():
     last_dart_check_minute = -1  # DART 공시 감시 마지막 실행 시각 (분 단위)
     last_universe_expand = None  # 유니버스 확장 마지막 실행 월
     last_sector_flow_run = None  # 섹터 수급 수집 마지막 실행일
+    last_smart_money_run = None  # 스마트 머니 수집 마지막 실행일
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -166,6 +167,21 @@ def run_watchdog():
                     log("✨ [Schedule] 섹터 수급 로테이션 신호 수집 완료")
                 except Exception as e:
                     log(f"❌ [Schedule] 섹터 수급 로테이션 신호 수집 실패: {e}")
+
+        # [스케줄링] 스마트 머니(내부자 매수) 수집 (장 운영일 16:00 이후 30분 윈도우 내 한 번만)
+        smart_money_target = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if not is_today_holiday and smart_money_target <= now < smart_money_target + timedelta(minutes=30):
+            today_str = now.strftime("%Y-%m-%d")
+            if last_smart_money_run != today_str:
+                log("📅 [Schedule] DART 스마트 머니(내부자 매수) 수집 실행")
+                smart_money_path = os.path.join(BASE_DIR, "stock_trader/core/smart_money_collector.py")
+                try:
+                    # 모듈 자체 실행 시 최근 3일치 수집하도록 구현되어 있음
+                    subprocess.run([VENV_PYTHON, smart_money_path], env=env, check=True, timeout=300)
+                    last_smart_money_run = today_str
+                    log("✨ [Schedule] 스마트 머니 수집 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] 스마트 머니 수집 실패: {e}")
 
         # 주말 파라미터 자가 학습은 PC(Trainer Node)에서 처리하므로 모바일 스케줄은 제거함
 

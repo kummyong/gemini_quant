@@ -352,6 +352,15 @@ class StrategyEngine:
             raw_stocks_data.append((ticker, name, df_hist))
             time.sleep(0.1) # Termux 리소스 방어용 짧은 대기
 
+        recent_insider_buying_tickers = set()
+        if self.repo and getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
+            try:
+                recent_insider_buying_tickers = self.repo.get_recent_insider_buying_tickers(days=5)
+                if recent_insider_buying_tickers:
+                    logger.info(f"💡 최근 5일 내 내부자 장내매수 포착 종목 수: {len(recent_insider_buying_tickers)}개")
+            except Exception as e:
+                logger.warning(f"⚠️ 내부자 장내매수 내역 조회 실패: {e}")
+
         real_stocks = []
         for i, (ticker, name, df_hist) in enumerate(raw_stocks_data):
             # API Rate Limit 방어 (20개마다 3초 지연 추가)
@@ -449,6 +458,7 @@ class StrategyEngine:
                 "dart_cf_quality": dart_cf_quality,
                 "dart_dividend_yield": dart_dividend_yield,
                 "dart_major_shareholder_bonus": dart_major_shareholder_bonus,
+                "has_insider_buying": ticker in recent_insider_buying_tickers,
                 "dart_available": dart_available,
                 **features,
                 "industry_score": 50.0

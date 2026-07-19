@@ -199,6 +199,25 @@ class DartAPI:
         
         return data.get("list", [])
     
+    # ─── 임원ㆍ주요주주 특정증권등 소유상황보고서 API ───
+    
+    def get_executive_shareholders(self, stock_code: str) -> list:
+        """
+        임원ㆍ주요주주 특정증권등 소유상황보고서를 조회한다.
+        
+        Returns:
+            list of dict: 임원 소유 현황 (증감사유, 변동수량 등 포함)
+        """
+        corp_code = self.get_corp_code(stock_code)
+        if not corp_code:
+            return []
+        
+        data = self._request("elestock.json", {
+            "corp_code": corp_code
+        })
+        
+        return data.get("list", [])
+    
     # ─── 공시 검색 API ───
     
     def search_disclosures(self, bgn_de: str, end_de: str, corp_code: str = "", corp_cls: str = "Y", page_count: int = 100) -> list:
