@@ -4,7 +4,7 @@ import logging
 import configparser
 import os
 from mcp.server.fastmcp import FastMCP
-from kiwoom_errors import get_error_message
+from .kiwoom_errors import get_error_message
 
 # 로깅 설정
 logging.basicConfig(
