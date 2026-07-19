@@ -10,6 +10,10 @@ logger = logging.getLogger("Backtester")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 class VectorBacktester:
+    # 거래비용 (편도 수수료 0.015% + 매도 시 증권거래세 0.15%)
+    COMMISSION_RATE = 0.00015
+    SELL_TAX_RATE = 0.0015
+
     def __init__(self, tickers: dict, start_date: str, end_date: str, initial_capital: float = 10000000.0):
         self.tickers = tickers
         self.start_date = start_date
@@ -18,8 +22,8 @@ class VectorBacktester:
         self.data = {}
         self.vix_data = None
         self.kospi_data = None
-        
-        self.portfolio = [] # list of dicts: {'ticker': '', 'buy_price': 0, 'quantity': 0, 'highest_price': 0, 'atr': 0}
+
+        self.portfolio = [] # list of dicts: {'ticker': '', 'buy_price': 0, 'quantity': 0, 'highest_price': 0, 'atr_pct': 0}
         self.capital = initial_capital
         self.equity_curve = []
         self.trade_history = []
@@ -102,55 +106,64 @@ class VectorBacktester:
                 ticker = pos['ticker']
                 if ticker not in self.data or date not in self.data[ticker].index:
                     continue
-                    
+
                 today_data = self.data[ticker].loc[date]
                 if pd.isna(today_data['Close']):
                     continue
-                
-                pos['highest_price'] = max(pos['highest_price'], today_data['High'])
+
                 # Market Regime based Trailing Stop
                 regime = "NEUTRAL"
                 if date in self.kospi_data.index:
                     regime = self.kospi_data.loc[date]['Regime']
-                    
+
                 if regime == "BULL":
                     mult, max_drop = 5.0, 25.0
                 elif regime == "BEAR":
-                    mult, max_drop = 1.5, 8.0
+                    mult, max_drop = 1.0, 5.0
                 else:
-                    mult, max_drop = 2.5, 15.0
-                    
-                dynamic_trailing = max(3.0, min(max_drop, mult * pos['atr']))
-                stop_price = pos['highest_price'] - dynamic_trailing
+                    mult, max_drop = 2.5, 10.0
+
+                trailing_pct = max(3.0, min(max_drop, mult * pos['atr_pct']))
                 
-                # Hard stop
-                dynamic_hard = max(3.0, min(8.0, 1.5 * pos['atr']))
-                hard_stop_price = pos['buy_price'] - dynamic_hard
+                # 선견 편향 방지: 스탑 라인은 '전일까지의 고점' 기준으로 먼저 판정하고,
+                # 당일 고가 반영은 판정 후에 한다 (당일 고가로 라인을 올려놓고 같은 봉에서
+                # 체결시키면 고가 근처 매도라는 불가능한 체결이 된다).
+                stop_price = pos['highest_price'] * (1.0 - trailing_pct / 100.0)
+                dynamic_hard_pct = max(3.0, min(6.0, 1.5 * pos['atr_pct']))
+                hard_stop_price = pos['buy_price'] * (1.0 - dynamic_hard_pct / 100.0)
                 final_stop_price = max(stop_price, hard_stop_price)
-                
+
                 if today_data['Low'] <= final_stop_price:
+                    # 갭하락 시 시가 체결, 아니면 스탑 라인 체결
                     sell_price = min(today_data['Open'], final_stop_price)
                     revenue = sell_price * pos['quantity']
+                    revenue *= (1.0 - self.COMMISSION_RATE - self.SELL_TAX_RATE)
                     self.capital += revenue
-                    
+
                     profit_pct = (sell_price - pos['buy_price']) / pos['buy_price'] * 100
                     self.trade_history.append({
+                        'buy_date': pos.get('buy_date', ''),
                         'sell_date': date_str,
                         'ticker': ticker,
+                        'regime_at_buy': pos.get('regime_at_buy', ''),
                         'buy_price': pos['buy_price'],
                         'sell_price': sell_price,
                         'profit_pct': profit_pct
                     })
                     self.portfolio.remove(pos)
                     sold_this_turn.append(ticker)
+                else:
+                    pos['highest_price'] = max(pos['highest_price'], today_data['High'])
 
             # 2. Check Macro Regime (VIX)
             if date not in self.vix_data.index:
                 vix_disp = 0
+                vix_val = 0
             else:
                 vix_disp = self.vix_data.loc[date]['VIX_Disparity']
+                vix_val = self.vix_data.loc[date]['VIXCLS']
                 
-            is_panic = vix_disp > 20.0
+            is_panic = (vix_disp > 15.0) or (vix_val > 30.0)
             
             # 3. Screen for new candidates
             candidates = []
@@ -186,11 +199,12 @@ class VectorBacktester:
                                 score += min(10.0, rel_mom * 0.1)
                             
                     if score >= 60.0:
+                        atr_pct = (row['ATR'] / row['Close'] * 100.0) if (not pd.isna(row['ATR']) and row['Close'] > 0) else 3.0
                         candidates.append({
                             'ticker': ticker,
                             'score': score,
                             'close': row['Close'],
-                            'atr': row['ATR']
+                            'atr_pct': atr_pct
                         })
                 
                 candidates.sort(key=lambda x: x['score'], reverse=True)
@@ -209,7 +223,7 @@ class VectorBacktester:
                     if regime == "BULL":
                         size_factor = 1.5
                     elif regime == "BEAR":
-                        size_factor = 0.5
+                        size_factor = 0.2
                         
                     for cand in candidates[:slots_available]:
                         price = cand['close']
@@ -221,14 +235,21 @@ class VectorBacktester:
                         
                         quantity = int(alloc / price)
                         if quantity > 0:
-                            cost = quantity * price
+                            cost = quantity * price * (1.0 + self.COMMISSION_RATE)
+                            if cost > self.capital:
+                                quantity = int(self.capital / (price * (1.0 + self.COMMISSION_RATE)))
+                                cost = quantity * price * (1.0 + self.COMMISSION_RATE)
+                            if quantity <= 0:
+                                continue
                             self.capital -= cost
                             self.portfolio.append({
                                 'ticker': cand['ticker'],
+                                'buy_date': date_str,
+                                'regime_at_buy': regime,
                                 'buy_price': price,
                                 'quantity': quantity,
                                 'highest_price': price,
-                                'atr': cand['atr']
+                                'atr_pct': cand['atr_pct']
                             })
             
             # Calculate Equity

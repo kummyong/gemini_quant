@@ -35,12 +35,14 @@ def main():
         "009150": "삼성전기"
     }
 
-    # 최근 20년간 테스트 (현재 시점: 2026-07-19 기준 과거 20년)
-    start_date = "2006-07-19"
+    # 주의: FinanceDataReader 기본 소스는 KRX 개별 종목 OHLCV를 2014-04-23부터만 제공한다
+    # (지수는 그 이전도 제공되어 착시 발생 — 2014년 이전을 넣으면 '매매 0건'이 수익률 0%로 위장됨).
+    # 따라서 검증 가능한 최대 기간인 약 12년으로 정직하게 라벨링한다.
+    start_date = "2014-04-23"
     end_date = "2026-07-19"
 
-    print(f"=== 스마트 머니(Core) 과거 데이터 백테스트 ===")
-    print(f"테스트 기간: {start_date} ~ {end_date}")
+    print(f"=== 국면(BULL/BEAR) + 점수 진입 로직 백테스트 (거래비용 포함) ===")
+    print(f"테스트 기간: {start_date} ~ {end_date} (FDR 데이터 한계로 12년)")
     print(f"테스트 유니버스: KOSPI 상위 {len(universe)}개 종목")
 
     bt = VectorBacktester(
@@ -56,10 +58,16 @@ def main():
     summary = bt.get_summary()
     print(json.dumps(summary, indent=4, ensure_ascii=False))
 
+    # 연도별 심층 분석용 전체 거래 내역 저장
+    trades_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "backtest_trades.csv")
+    os.makedirs(os.path.dirname(trades_path), exist_ok=True)
+    pd.DataFrame(bt.trade_history).to_csv(trades_path, index=False, encoding="utf-8-sig")
+    print(f"거래 내역 저장: {trades_path} ({len(bt.trade_history)}건)")
+
     # 그래프 그리기
+    # (주의) 함수 안에서 pandas를 다시 import하면 pd가 지역변수로 취급되어
+    # 그보다 앞선 pd 참조가 UnboundLocalError로 깨진다 — 모듈 상단 import만 사용할 것.
     try:
-        import pandas as pd
-        
         equity_df = pd.DataFrame(bt.equity_curve)
         equity_df['Date'] = pd.to_datetime(equity_df['Date'])
         equity_df.set_index('Date', inplace=True)
@@ -85,8 +93,8 @@ def main():
             plt.legend(fontsize=12, loc='upper left')
             plt.gca().yaxis.set_major_formatter(plt.matplotlib.ticker.StrMethodFormatter('{x:,.0f}'))
             
-            # Save Image
-            save_path = r"C:\Users\SDS\.gemini\antigravity\brain\0d82e71e-ba72-484b-8a50-a77b0f509954\scratch\equity_curve.png"
+            # Save Image (프로젝트 소유 reports/ 폴더로 저장)
+            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "backtest_20y_equity_curve.png")
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
