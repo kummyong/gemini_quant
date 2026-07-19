@@ -23,7 +23,7 @@ python-dotenv
 # Google API (secretary)
 google-api-python-client
 google-auth-oauthlib
-google-generativeai
+google-genai
 
 # MCP 서버 (텔레그램·Google)
 mcp

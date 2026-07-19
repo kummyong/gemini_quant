@@ -1,6 +1,7 @@
 import os
 import sys
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # 경로 설정 및 도구 임포트
@@ -15,13 +16,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def simulate_test():
     print("=== [에이전트 지능 및 도구 호출 시뮬레이션 테스트] ===")
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
     
     # 도구 등록
     tools = [get_account_status, execute_market_order, update_profit_cut]
     # 가용성이 확인된 최신 모델로 변경
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash", tools=tools)
-    chat = model.start_chat(enable_automatic_function_calling=True)
+    chat = client.chats.create(
+        model="gemini-2.0-flash",
+        config=types.GenerateContentConfig(tools=tools)
+    )
     
     # 테스트 1: 계좌 상태 물어보기
     print("\n[Test 1] 사용자: '내 계좌 현황 좀 알려줘'")

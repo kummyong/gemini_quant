@@ -434,6 +434,6 @@ def skill_router(function_name, arguments):
     return f"Unknown function: {function_name}"
 
 # 하위 호환성을 위한 개별 함수 노출 (사용 중인 파일이 있을 수 있음)
-def get_account_status(): return get_account_summary()
-def execute_market_order(ticker, action, ratio): return f"Market order interface for {ticker}"
-def update_profit_cut(ratio): return f"Profit cut interface for {ratio}"
+def get_account_status() -> str: return get_account_summary()
+def execute_market_order(ticker: str, action: str, ratio: float) -> str: return f"Market order interface for {ticker}"
+def update_profit_cut(ratio: float) -> str: return f"Profit cut interface for {ratio}"
