@@ -58,6 +58,78 @@ def _normalize_sector_name(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", name or "")
 
 
+# 네이버(WICS 계열) 업종명 → Kiwoom(KRX 표준) 업종명 별칭 테이블.
+# 두 분류 체계가 달라 정규화/부분일치만으로는 매핑률이 25% 수준이라(실측 3/12),
+# 라이브 수집된 KRX 60개 업종명 기준으로 자주 등장하는 WICS 명칭을 수동 매핑한다.
+# 키는 정규화된(공백/특수문자 제거) 네이버 업종명.
+NAVER_TO_KRX_SECTOR_ALIAS = {
+    # 전기/전자 계열
+    "반도체와반도체장비": "전기/전자",
+    "전자장비와기기": "전기/전자",
+    "전기제품": "전기/전자",
+    "디스플레이장비및부품": "전기/전자",
+    "디스플레이패널": "전기/전자",
+    "핸드셋": "전기/전자",
+    "IT가전": "전기/전자",
+    # 운송장비/부품 (자동차·조선·방산)
+    "자동차": "운송장비/부품",
+    "자동차부품": "운송장비/부품",
+    "조선": "운송장비/부품",
+    "우주항공과국방": "운송장비/부품",
+    # 운송/창고
+    "항공사": "운송/창고",
+    "해운사": "운송/창고",
+    "항공화물운송과물류": "운송/창고",
+    # 금융 계열
+    "은행": "금융",
+    "카드": "금융",
+    "기타금융": "금융",
+    "창업투자": "금융",
+    "손해보험": "보험",
+    "생명보험": "보험",
+    # 소재 계열
+    "철강": "금속",
+    "비철금속": "금속",
+    "전기유틸리티": "전기/가스",
+    "가스유틸리티": "전기/가스",
+    "건축자재": "비금속",
+    "건축제품": "비금속",
+    "종이와목재": "종이/목재",
+    "포장재": "종이/목재",
+    # 제약/의료
+    "생물공학": "제약",
+    "생명과학도구및서비스": "제약",
+    "건강관리장비와용품": "의료/정밀기기",
+    "건강관리업체및서비스": "의료/정밀기기",
+    # IT/미디어/오락
+    "양방향미디어와서비스": "IT 서비스",
+    "소프트웨어": "IT 서비스",
+    "IT서비스": "IT 서비스",
+    "게임엔터테인먼트": "오락/문화",
+    "엔터테인먼트": "오락/문화",
+    "방송과엔터테인먼트": "오락/문화",
+    "호텔레스토랑레저": "오락/문화",
+    "교육서비스": "일반서비스",
+    "상업서비스와공급품": "일반서비스",
+    # 통신
+    "무선통신서비스": "통신",
+    "다각화된통신서비스": "통신",
+    "통신서비스": "통신",
+    # 유통/소비
+    "백화점과일반상점": "유통",
+    "전문소매": "유통",
+    "판매업체": "유통",
+    "무역회사와판매업체": "유통",
+    "온라인쇼핑": "유통",
+    "식품과기본식료품소매": "음식료/담배",
+    "음료": "음식료/담배",
+    "식품": "음식료/담배",
+    "담배": "음식료/담배",
+    "섬유의류신발호화품": "섬유/의류",
+    "기계": "기계/장비",
+}
+
+
 def apply_sector_flow_score(stocks: List[Dict], flow_score_map: Dict[str, float]) -> None:
     """섹터 수급 로테이션 신호(core/sector_flow.py의 composite_z)를 industry_score에 가산 보정한다(in-place).
 
@@ -69,12 +141,19 @@ def apply_sector_flow_score(stocks: List[Dict], flow_score_map: Dict[str, float]
     if not flow_score_map:
         return
     normalized_map = {_normalize_sector_name(k): v for k, v in flow_score_map.items() if k}
+    normalized_alias = {_normalize_sector_name(k): _normalize_sector_name(v)
+                        for k, v in NAVER_TO_KRX_SECTOR_ALIAS.items()}
     matched, unmatched = 0, 0
     for s in stocks:
         ind_name = _normalize_sector_name(s.get("industry_name", ""))
         if not ind_name:
             continue
+        # 1) 정확일치 → 2) WICS→KRX 별칭 → 3) 부분일치 순서로 매칭
         flow_z = normalized_map.get(ind_name)
+        if flow_z is None:
+            alias_target = normalized_alias.get(ind_name)
+            if alias_target:
+                flow_z = normalized_map.get(alias_target)
         if flow_z is None:
             for norm_kiwoom_name, z in normalized_map.items():
                 if norm_kiwoom_name and (norm_kiwoom_name in ind_name or ind_name in norm_kiwoom_name):

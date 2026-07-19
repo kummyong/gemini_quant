@@ -197,8 +197,16 @@ def compute_rankings(lookback_days: int = LOOKBACK_DAYS, accel_window: int = ACC
 
 
 def get_flow_score_map() -> dict:
-    """scorer.apply_sector_momentum()이 소비하는 {inds_nm: composite_z} 딕셔너리를 반환한다."""
-    return {r["inds_nm"]: r["composite_z"] for r in compute_rankings() if r.get("inds_nm")}
+    """scorer.apply_sector_flow_score()가 소비하는 {inds_nm: composite_z} 딕셔너리를 반환한다.
+    코스피/코스닥에 같은 업종명이 존재하므로(화학, 제약 등) 중복 명칭은 평균으로 합친다."""
+    sums, counts = {}, {}
+    for r in compute_rankings():
+        nm = r.get("inds_nm")
+        if not nm:
+            continue
+        sums[nm] = sums.get(nm, 0.0) + r["composite_z"]
+        counts[nm] = counts.get(nm, 0) + 1
+    return {nm: round(sums[nm] / counts[nm], 3) for nm in sums}
 
 
 if __name__ == "__main__":
