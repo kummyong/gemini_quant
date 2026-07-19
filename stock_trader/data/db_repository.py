@@ -594,6 +594,23 @@ class DbRepository:
             row = cursor.fetchone()
             return row[0] if row else None
 
+    def get_last_buy_regime(self, ticker: str):
+        """지정 종목의 가장 최근 BUY 체결 시점 market_regime을 반환합니다 (기록 없으면 None).
+        features JSON에 market_regime이 없거나 파싱 실패 시에도 None으로 폴백한다.
+        strategy_engine의 국면별 최소 보유일(MIN_HOLDING_DAYS_BULL 등) 판정에 사용."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT features FROM trade_history WHERE ticker = ? AND side = 'BUY' ORDER BY timestamp DESC LIMIT 1",
+                (ticker,))
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                return json.loads(row[0]).get("market_regime")
+            except (ValueError, TypeError, AttributeError):
+                return None
+
     def get_pending_signals(self) -> list:
         """PENDING 상태의 매매 신호 전량 조회"""
         with self.get_connection() as conn:

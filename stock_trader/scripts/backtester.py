@@ -6,6 +6,8 @@ import logging
 from tqdm import tqdm
 import os
 
+from stock_trader.core.macro_indicators import compute_regime_series
+
 logger = logging.getLogger("Backtester")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -14,13 +16,22 @@ class VectorBacktester:
     COMMISSION_RATE = 0.00015
     SELL_TAX_RATE = 0.0015
 
-    def __init__(self, tickers: dict, start_date: str, end_date: str, initial_capital: float = 10000000.0, min_hold_days: int = 0, entry_threshold_base: float = 60.0):
+    def __init__(self, tickers: dict, start_date: str, end_date: str, initial_capital: float = 10000000.0, min_hold_days=0, entry_threshold_base: float = 60.0,
+                 overshoot_exit_fraction: float = 0.5, overshoot_rsi_thres: float = 70.0,
+                 regime_kwargs: dict = None):
+        """min_hold_days: 정수(전 국면 공통) 또는 {'BULL': x, 'NEUTRAL': y, 'BEAR': z} 형태의 국면별 딕셔너리.
+        overshoot_exit_fraction: 오버슈팅(RSI 과열/BB상단 돌파) 시 부분 익절 비율. 1.0이면 전량 익절(러너 비활성),
+        0.5면 절반 익절 후 잔여 물량을 트레일링/하드스탑 전용 '러너'로 전환한다 (라이브 strategy_engine과 동일 로직)."""
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
         self.initial_capital = initial_capital
         self.min_hold_days = min_hold_days
         self.entry_threshold_base = entry_threshold_base
+        self.overshoot_exit_fraction = overshoot_exit_fraction
+        self.overshoot_rsi_thres = overshoot_rsi_thres
+        # 국면 판정 파라미터 오버라이드 (None이면 core/macro_indicators의 기본값 = 라이브와 동일)
+        self.regime_kwargs = regime_kwargs or {}
         self.data = {}
         self.vix_data = None
         self.kospi_data = None
@@ -62,6 +73,11 @@ class VectorBacktester:
         
         return df
 
+    def _get_min_hold_days(self, regime_at_buy: str) -> float:
+        if isinstance(self.min_hold_days, dict):
+            return self.min_hold_days.get(regime_at_buy, self.min_hold_days.get('DEFAULT', 0))
+        return self.min_hold_days
+
     def prepare_data(self):
         logger.info(f"Downloading Macro (VIX) Data...")
         self.vix_data = fdr.DataReader('FRED:VIXCLS', start=self.start_date, end=self.end_date).dropna()
@@ -71,17 +87,8 @@ class VectorBacktester:
         logger.info(f"Downloading Benchmark (KOSPI) & Calculating Market Regime...")
         self.kospi_data = fdr.DataReader('KS11', start=self.start_date, end=self.end_date)
         self.kospi_data['Return_20d'] = self.kospi_data['Close'].pct_change(20)
-        self.kospi_data['MA20'] = self.kospi_data['Close'].rolling(20).mean()
-        self.kospi_data['MA120'] = self.kospi_data['Close'].rolling(120).mean()
-        self.kospi_data['Prev_MA20'] = self.kospi_data['MA20'].shift(1)
-        
-        # Determine Market Regime
-        conditions = [
-            (self.kospi_data['Close'] > self.kospi_data['MA120']) & (self.kospi_data['MA20'] > self.kospi_data['Prev_MA20']),
-            (self.kospi_data['Close'] < self.kospi_data['MA120'])
-        ]
-        choices = ["BULL", "BEAR"]
-        self.kospi_data['Regime'] = np.select(conditions, choices, default="NEUTRAL")
+        # Determine Market Regime — 라이브(fetch_market_regime)와 동일한 공유 함수 사용
+        self.kospi_data['Regime'] = compute_regime_series(self.kospi_data['Close'], **self.regime_kwargs)
 
         for ticker, name in self.tickers.items():
             logger.info(f"Downloading {name} ({ticker})...")
@@ -106,10 +113,33 @@ class VectorBacktester:
             
             for pos in list(self.portfolio):
                 ticker = pos['ticker']
-                if ticker not in self.data or date not in self.data[ticker].index:
+                if ticker not in self.data:
+                    continue
+                tdf = self.data[ticker]
+                if date not in tdf.index:
+                    # 데이터가 종료된 종목(상장폐지 등)은 마지막 종가로 강제 청산한다.
+                    # (기존에는 highest_price로 평가액이 동결되어 상폐 종목이 역대 최고가로
+                    # 영구 평가되는 낙관 편향이 있었음 — Top50 등 상폐 포함 유니버스에서 치명적)
+                    if len(tdf.index) > 0 and date > tdf.index[-1]:
+                        last_close = tdf['Close'].iloc[-1]
+                        revenue = last_close * pos['quantity'] * (1.0 - self.COMMISSION_RATE - self.SELL_TAX_RATE)
+                        self.capital += revenue
+                        profit_pct = (last_close - pos['buy_price']) / pos['buy_price'] * 100
+                        self.trade_history.append({
+                            'buy_date': pos.get('buy_date', ''),
+                            'sell_date': date_str,
+                            'ticker': ticker,
+                            'regime_at_buy': pos.get('regime_at_buy', ''),
+                            'buy_price': pos['buy_price'],
+                            'sell_price': last_close,
+                            'profit_pct': profit_pct,
+                            'exit_reason': 'delisted'
+                        })
+                        self.portfolio.remove(pos)
+                        sold_this_turn.append(ticker)
                     continue
 
-                today_data = self.data[ticker].loc[date]
+                today_data = tdf.loc[date]
                 if pd.isna(today_data['Close']):
                     continue
 
@@ -138,10 +168,11 @@ class VectorBacktester:
                 # 최소 보유 기간 중에는 트레일링 스탑 라인 자체를 무효화한다 (체결가에도 반영해야
                 # 트레일링 라인의 더 유리한 가격으로 체결되는 낙관 편향이 생기지 않는다).
                 in_grace = False
-                if self.min_hold_days > 0:
+                mh = self._get_min_hold_days(pos.get('regime_at_buy', 'NEUTRAL'))
+                if mh > 0:
                     buy_dt = pd.Timestamp(pos.get('buy_date', date_str))
                     days_held = (date - buy_dt).days
-                    in_grace = days_held < self.min_hold_days
+                    in_grace = days_held < mh
 
                 effective_stop_price = hard_stop_price if in_grace else final_stop_price
 
@@ -160,12 +191,47 @@ class VectorBacktester:
                         'regime_at_buy': pos.get('regime_at_buy', ''),
                         'buy_price': pos['buy_price'],
                         'sell_price': sell_price,
-                        'profit_pct': profit_pct
+                        'profit_pct': profit_pct,
+                        'exit_reason': 'hard_stop' if effective_stop_price <= hard_stop_price else 'trailing_stop'
                     })
                     self.portfolio.remove(pos)
                     sold_this_turn.append(ticker)
                 else:
                     pos['highest_price'] = max(pos['highest_price'], today_data['High'])
+
+                    # 오버슈팅(RSI 과열/BB상단 돌파) 부분 익절 + 러너 전환 (라이브 strategy_engine
+                    # generate_management_signals의 오버슈팅 분기와 동일 로직: BULL 국면 제외,
+                    # 러너 전환된 포지션은 이후 트레일링/하드스탑으로만 관리).
+                    rsi_val = today_data.get('RSI', float('nan'))
+                    bb_upper = today_data.get('BB_upper', float('nan'))
+                    if (regime != "BULL" and not pos.get('is_runner', False)
+                            and not pd.isna(rsi_val) and not pd.isna(bb_upper)
+                            and (rsi_val >= self.overshoot_rsi_thres or today_data['Close'] >= bb_upper)):
+                        fraction = self.overshoot_exit_fraction
+                        sell_qty = pos['quantity'] if fraction >= 1.0 else int(pos['quantity'] * fraction)
+                        if 0 < sell_qty <= pos['quantity']:
+                            exit_price = today_data['Close']
+                            revenue = exit_price * sell_qty * (1.0 - self.COMMISSION_RATE - self.SELL_TAX_RATE)
+                            self.capital += revenue
+
+                            profit_pct = (exit_price - pos['buy_price']) / pos['buy_price'] * 100
+                            self.trade_history.append({
+                                'buy_date': pos.get('buy_date', ''),
+                                'sell_date': date_str,
+                                'ticker': ticker,
+                                'regime_at_buy': pos.get('regime_at_buy', ''),
+                                'buy_price': pos['buy_price'],
+                                'sell_price': exit_price,
+                                'profit_pct': profit_pct,
+                                'exit_reason': 'overshoot_runner' if sell_qty < pos['quantity'] else 'overshoot_full'
+                            })
+
+                            if sell_qty >= pos['quantity']:
+                                self.portfolio.remove(pos)
+                                sold_this_turn.append(ticker)
+                            else:
+                                pos['quantity'] -= sell_qty
+                                pos['is_runner'] = True
 
             # 2. Check Macro Regime (VIX)
             if date not in self.vix_data.index:
@@ -274,16 +340,21 @@ class VectorBacktester:
                                 'buy_price': price,
                                 'quantity': quantity,
                                 'highest_price': price,
-                                'atr_pct': cand['atr_pct']
+                                'atr_pct': cand['atr_pct'],
+                                'is_runner': False
                             })
             
             # Calculate Equity
             total_equity = self.capital
             for pos in self.portfolio:
-                if date in self.data[pos['ticker']].index:
-                    total_equity += self.data[pos['ticker']].loc[date]['Close'] * pos['quantity']
+                tdf = self.data[pos['ticker']]
+                if date in tdf.index:
+                    total_equity += tdf.loc[date]['Close'] * pos['quantity']
                 else:
-                    total_equity += pos['highest_price'] * pos['quantity'] # Fallback
+                    # 일시 거래정지 등으로 당일 데이터가 없으면 직전 종가로 평가한다
+                    # (구 fallback인 highest_price는 역대 최고가라 낙관 편향)
+                    px = tdf['Close'].loc[:date]
+                    total_equity += (px.iloc[-1] if len(px) else pos['buy_price']) * pos['quantity']
             
             self.equity_curve.append({
                 'Date': date_str,

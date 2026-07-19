@@ -50,7 +50,10 @@ def main():
         start_date=start_date,
         end_date=end_date,
         initial_capital=100_000_000.0, # 1억 원
-        min_hold_days=7
+        # 국면별 최소 보유일 (그리드 실험 A안 검증: 균일 7일 대비 수익률 159.89%->174.96%,
+        # MDD -30.20%->-31.08%로 위험조정 수익 개선. NEUTRAL/BEAR 단축은 악화되어 7일 유지,
+        # BULL만 14일로 연장 — strategy_engine.py의 MIN_HOLDING_DAYS_BULL과 동일한 값)
+        min_hold_days={"BULL": 14, "NEUTRAL": 7, "BEAR": 7, "DEFAULT": 7}
     )
     
     bt.run()

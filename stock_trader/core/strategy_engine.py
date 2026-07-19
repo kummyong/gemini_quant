@@ -158,6 +158,11 @@ class StrategyEngine:
             "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
             "HARD_STOP_COOLDOWN_DAYS": 5.0,  # 글로벌 하드스탑 락아웃 최소 유지 일수 (해제에는 BULL 국면도 필요)
             "MIN_HOLDING_DAYS": 7.0,      # 교체/트레일링 매도 규율: 매수 후 최소 보유 달력일 (하드 스탑에는 미적용)
+            # BULL 국면 매수분 전용 최소 보유일. 검증(run_backtest_bullhold_c0.py):
+            # 워크포워드 전/후반기 모두에서 균일 7일 대비 방향 일관되게 우위(-17.3%→-15.5% / 230.8%→247.9%),
+            # BULL 휩쏘 평균 지속 12.7일을 넘겨 그레이스 해제 직후 손절 패턴을 회피하는 메커니즘 뒷받침.
+            # 단, 민감도상 14가 국소 범프(주변 7~12일은 170%대)라 기대 우위는 완만한 수준으로 볼 것.
+            "MIN_HOLDING_DAYS_BULL": 14.0,
             # 추세추종 진입 문턱 (백테스트 B1 검증: 기존 하드코딩 RSI<=65 / 상대강도>3% 에서 완화)
             "TF_RSI_MIN": 45.0,
             "TF_RSI_MAX": 70.0,
@@ -207,6 +212,7 @@ class StrategyEngine:
         self.BEAR_POSITION_FACTOR = float(params["BEAR_POSITION_FACTOR"])
         self.HARD_STOP_COOLDOWN_DAYS = int(params["HARD_STOP_COOLDOWN_DAYS"])
         self.MIN_HOLDING_DAYS = int(params["MIN_HOLDING_DAYS"])
+        self.MIN_HOLDING_DAYS_BULL = int(params["MIN_HOLDING_DAYS_BULL"])
         self.TF_RSI_MIN = float(params["TF_RSI_MIN"])
         self.TF_RSI_MAX = float(params["TF_RSI_MAX"])
         self.TF_REL_MOMENTUM_MIN = float(params["TF_REL_MOMENTUM_MIN"])
@@ -669,7 +675,12 @@ class StrategyEngine:
         return feat
 
     def _is_within_min_holding(self, ticker: str) -> bool:
-        """교체 매도 규율: 마지막 매수 후 MIN_HOLDING_DAYS(달력일) 미경과 여부.
+        """교체/트레일링 매도 규율: 마지막 매수 후 최소 보유일(달력일) 미경과 여부.
+
+        BULL 국면 매수분은 MIN_HOLDING_DAYS_BULL(기본 14일)을, 그 외는 MIN_HOLDING_DAYS
+        (기본 7일)를 적용한다 (그리드 실험 A안 검증: 균일 7일 대비 위험조정 수익 개선,
+        NEUTRAL/BEAR 단축은 오히려 악화되어 유지). 매수 시점 국면을 조회할 수 없으면
+        MIN_HOLDING_DAYS로 폴백한다.
 
         trade_history의 최근 BUY 체결 시각으로 판정하며, 매수 이력을 확인할 수
         없거나 조회에 실패하면 False(기존 동작: 교체 허용)로 폴백한다."""
@@ -681,7 +692,15 @@ class StrategyEngine:
                 return False
             buy_date = datetime.datetime.strptime(str(ts)[:10], "%Y-%m-%d").date()
             days_held = (datetime.datetime.now(pytz.timezone('Asia/Seoul')).date() - buy_date).days
-            return days_held < self.MIN_HOLDING_DAYS
+
+            min_hold = self.MIN_HOLDING_DAYS
+            try:
+                if self.repo.get_last_buy_regime(ticker) == "BULL":
+                    min_hold = getattr(self, 'MIN_HOLDING_DAYS_BULL', self.MIN_HOLDING_DAYS)
+            except Exception as regime_e:
+                logger.warning(f"[{ticker}] 매수 시점 국면 조회 실패 (기본 MIN_HOLDING_DAYS 적용): {regime_e}")
+
+            return days_held < min_hold
         except Exception as e:
             logger.warning(f"[{ticker}] 최근 매수일 조회 실패 (교체 규율 미적용): {e}")
             return False
