@@ -157,7 +157,7 @@ class StrategyEngine:
             "HARD_STOP_LOSS": -5.0,
             "BEAR_POSITION_FACTOR": 0.5,  # BEAR 국면 역추세 매수 비중 배수 (0이면 신규 매수 전면 중지)
             "HARD_STOP_COOLDOWN_DAYS": 5.0,  # 글로벌 하드스탑 락아웃 최소 유지 일수 (해제에는 BULL 국면도 필요)
-            "MIN_HOLDING_DAYS": 5.0,      # 교체 매도 규율: 매수 후 최소 보유 달력일 (리스크 청산에는 미적용)
+            "MIN_HOLDING_DAYS": 7.0,      # 교체/트레일링 매도 규율: 매수 후 최소 보유 달력일 (하드 스탑에는 미적용)
             # 추세추종 진입 문턱 (백테스트 B1 검증: 기존 하드코딩 RSI<=65 / 상대강도>3% 에서 완화)
             "TF_RSI_MIN": 45.0,
             "TF_RSI_MAX": 70.0,
@@ -854,22 +854,26 @@ class StrategyEngine:
                 })
                 logger.warning(f"⚠️ [{b_id}][개별 손절] {stock['name']} 절대 손절선 도달로 전량 청산 (수익률: {profit:.2f}%, ATR 기준: {dynamic_hard_stop:.2f}%)")
             elif max_profit >= 2.0 and (max_profit - profit) >= dynamic_trailing_stop:
+                # 최소 보유 기간 중에는 트레일링 스탑 무시 (하드 스탑만 작동)
+                if self._is_within_min_holding(ticker):
+                    logger.info(f"⏳ [{b_id}][트레일링 유보] {stock['name']} 매수 후 {self.MIN_HOLDING_DAYS}일 미경과로 트레일링 스탑 유보 (수익률: {profit:.2f}%)")
+                else:
                 feat = self._build_feature_dict(s_data, {
                     "exit_reason": "trailing_stop",
                     "profit_rate": profit,
                     "max_profit_rate": max_profit,
                     "dynamic_trailing_stop": dynamic_trailing_stop
                 })
-                sell_signals.append({
-                    "broker_id": b_id,
-                    "ticker": ticker,
-                    "name": stock["name"],
-                    "action": "SELL",
-                    "quantity": quantity,
-                    "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {dynamic_trailing_stop:.2f}%p)",
-                    "features": json.dumps(feat, ensure_ascii=False)
-                })
-                logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
+                    sell_signals.append({
+                        "broker_id": b_id,
+                        "ticker": ticker,
+                        "name": stock["name"],
+                        "action": "SELL",
+                        "quantity": quantity,
+                        "reason": f"Trailing Stop 작동 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%, 하락폭: {max_profit-profit:.2f}%p, 기준: {dynamic_trailing_stop:.2f}%p)",
+                        "features": json.dumps(feat, ensure_ascii=False)
+                    })
+                    logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
             elif self.market_regime != "BULL" and (rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band) and not stock.get("is_runner", False):
                 # 러너 관리: 오버슈팅 시 일부만 익절하고 잔여 물량은 러너로 전환하여
                 # 트레일링/하드스탑으로만 관리한다 (러너는 오버슈팅 재발동 제외).

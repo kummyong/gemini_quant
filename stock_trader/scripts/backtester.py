@@ -14,11 +14,13 @@ class VectorBacktester:
     COMMISSION_RATE = 0.00015
     SELL_TAX_RATE = 0.0015
 
-    def __init__(self, tickers: dict, start_date: str, end_date: str, initial_capital: float = 10000000.0):
+    def __init__(self, tickers: dict, start_date: str, end_date: str, initial_capital: float = 10000000.0, min_hold_days: int = 0, entry_threshold_base: float = 60.0):
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
         self.initial_capital = initial_capital
+        self.min_hold_days = min_hold_days
+        self.entry_threshold_base = entry_threshold_base
         self.data = {}
         self.vix_data = None
         self.kospi_data = None
@@ -134,6 +136,15 @@ class VectorBacktester:
                 final_stop_price = max(stop_price, hard_stop_price)
 
                 if today_data['Low'] <= final_stop_price:
+                    # 최소 보유 기간 중에는 트레일링 스탑 무시 (하드 스탑만 작동)
+                    if self.min_hold_days > 0:
+                        buy_dt = pd.Timestamp(pos.get('buy_date', date_str))
+                        days_held = (date - buy_dt).days
+                        if days_held < self.min_hold_days:
+                            # 하드 스탑(절대 손절선)에만 걸리면 매도, 트레일링 스탑이면 스킵
+                            if today_data['Low'] > hard_stop_price:
+                                pos['highest_price'] = max(pos['highest_price'], today_data['High'])
+                                continue
                     # 갭하락 시 시가 체결, 아니면 스탑 라인 체결
                     sell_price = min(today_data['Open'], final_stop_price)
                     revenue = sell_price * pos['quantity']
@@ -209,7 +220,7 @@ class VectorBacktester:
                     if date in self.kospi_data.index:
                         regime_for_entry = self.kospi_data.loc[date]['Regime']
                         
-                    entry_threshold = 70.0 if regime_for_entry == "BEAR" else 60.0
+                    entry_threshold = 70.0 if regime_for_entry == "BEAR" else self.entry_threshold_base
                             
                     if score >= entry_threshold:
                         atr_pct = (row['ATR'] / row['Close'] * 100.0) if (not pd.isna(row['ATR']) and row['Close'] > 0) else 3.0
