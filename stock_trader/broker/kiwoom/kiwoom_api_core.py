@@ -48,10 +48,13 @@ class KiwoomApiCore:
             try:
                 res = requests.post(url, json=body, timeout=10)
                 if res.status_code == 200:
-                    token = res.json().get("token")
+                    data = res.json()
+                    token = data.get("token")
                     if token:
                         logger.info("✅ API 토큰 발급 성공")
                         return token
+                    # 200이어도 키 인증 실패(예: 8001) 등이 return_code로 올 수 있다 — 사유를 남겨야 원인 파악이 된다
+                    logger.error(f"❌ 토큰 발급 거절: return_code={data.get('return_code')}, msg={data.get('return_msg')}")
                 elif res.status_code == 429:
                     wait_time = (i + 1) * 2
                     logger.warning(f"⚠️ 토큰 발급 레이트 리밋 감지. {wait_time}초 후 재시도 ({i+1}/{max_retries})")
@@ -125,7 +128,16 @@ class KiwoomApiCore:
         api_id = "kt10000" if side.upper() == "BUY" else "kt10001"
         body = {
             "acc_no": acc_no, "pw": "0000", "stk_cd": stock_code,
-            "ord_qty": str(quantity), "ord_prc": "0", "ord_tp": "03", 
+            "ord_qty": str(quantity), "ord_prc": "0", "ord_tp": "03",
             "unit_tp": "1", "dmst_stex_tp": "KRX", "trde_tp": "03"
         }
         return self._request("/api/dostk/ordr", api_id, body=body)
+
+    def get_sector_investor_netbuy(self, mrkt_tp, base_dt=""):
+        """업종별 투자자 순매수 (ka10051). mrkt_tp: '0'=코스피, '1'=코스닥"""
+        body = {"mrkt_tp": mrkt_tp, "amt_qty_tp": "0", "base_dt": base_dt, "stex_tp": "3"}
+        return self._request("/api/dostk/sect", "ka10051", body=body)
+
+    def get_sector_index(self, inds_cd):
+        """전업종지수 (ka20003). inds_cd: '001'=코스피, '101'=코스닥"""
+        return self._request("/api/dostk/sect", "ka20003", body={"inds_cd": inds_cd})

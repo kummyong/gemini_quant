@@ -5,6 +5,7 @@ fetch_market_data() 후반부의 주간(5일) 섹터 모멘텀 계산을 분리�
 외부 I/O 없이 종목 딕셔너리 리스트만 입력받아 동작한다.
 """
 import logging
+import re
 from typing import Dict, List
 
 logger = logging.getLogger("MultiFactorScorer")
@@ -44,6 +45,43 @@ def apply_sector_momentum(stocks: List[Dict]) -> None:
             logger.info(f"📂 [{s['name']}] 업종: {ind_name} | 5일 섹터 모멘텀: {avg_ret_5d:+.2f}% | 업종 점수: {s['industry_score']:.1f}")
     except Exception as sec_e:
         logger.error(f"주간 섹터 모멘텀 계산 오류: {sec_e}")
+
+
+def _normalize_sector_name(name: str) -> str:
+    """업종명 비교용 정규화: 공백/특수문자 제거."""
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", name or "")
+
+
+def apply_sector_flow_score(stocks: List[Dict], flow_score_map: Dict[str, float]) -> None:
+    """섹터 수급 로테이션 신호(core/sector_flow.py의 composite_z)를 industry_score에 가산 보정한다(in-place).
+
+    flow_score_map은 {Kiwoom 업종명: composite_z}. 네이버 크롤링 industry_name과 Kiwoom 업종명은
+    분류 체계가 달라 정확히 일치하지 않을 수 있으므로 정규화 후 정확일치 → 부분일치 순으로 매칭하고,
+    끝내 매칭에 실패한 종목은 조용히 건너뛴다(기존 가격 모멘텀 기반 industry_score를 그대로 유지).
+    실거래 파이프라인이므로 매핑 실패가 스코어링 자체를 중단시켜서는 안 된다.
+    """
+    if not flow_score_map:
+        return
+    normalized_map = {_normalize_sector_name(k): v for k, v in flow_score_map.items() if k}
+    matched, unmatched = 0, 0
+    for s in stocks:
+        ind_name = _normalize_sector_name(s.get("industry_name", ""))
+        if not ind_name:
+            continue
+        flow_z = normalized_map.get(ind_name)
+        if flow_z is None:
+            for norm_kiwoom_name, z in normalized_map.items():
+                if norm_kiwoom_name and (norm_kiwoom_name in ind_name or ind_name in norm_kiwoom_name):
+                    flow_z = z
+                    break
+        if flow_z is None:
+            unmatched += 1
+            continue
+        matched += 1
+        adjustment = max(-10.0, min(10.0, flow_z * 5.0))
+        base_score = s.get("industry_score", 57.5)
+        s["industry_score"] = max(20.0, min(95.0, base_score + adjustment))
+    logger.info(f"📊 섹터 수급 점수 병합: {matched}개 종목 매칭, {unmatched}개 미매칭(가격모멘텀만 반영)")
 
 
 class MultiFactorScorer:

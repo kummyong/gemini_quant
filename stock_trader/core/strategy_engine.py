@@ -20,6 +20,7 @@ from stock_trader.core.market_features import compute_technical_features
 from stock_trader.core.scorer import (
     MultiFactorScorer,
     apply_sector_momentum,
+    apply_sector_flow_score,
     WEIGHT_EARNINGS,
     WEIGHT_MACRO,
     WEIGHT_DART_REVENUE,
@@ -28,6 +29,7 @@ from stock_trader.core.scorer import (
     WEIGHT_INSTITUTIONAL,
 )
 from stock_trader.core.korean_market_calendar import is_first_trading_day_of_month
+from stock_trader import config as trader_config
 from stock_trader.config import STOCK_TRADER_DIR as BASE_DIR, LOG_DIR, DB_PATH, ACTIVE_STRATEGY_PROFILE, STOCK_MULTIFACTOR, ETF_TREND, ETF_UNIVERSE
 LOG_PATH = os.path.join(LOG_DIR, "strategy_engine.log")
 
@@ -453,6 +455,15 @@ class StrategyEngine:
 
         # 주간(5일) 섹터 모멘텀 계산 → industry_score 갱신
         apply_sector_momentum(real_stocks)
+
+        # 섹터 수급 로테이션 신호 병합 (선택적 — 매핑/조회 실패 시 가격 모멘텀만으로 계속 진행)
+        if trader_config.ENABLE_SECTOR_FLOW_BLEND:
+            try:
+                from stock_trader.core.sector_flow import get_flow_score_map
+                flow_score_map = get_flow_score_map()
+                apply_sector_flow_score(real_stocks, flow_score_map)
+            except Exception as flow_e:
+                logger.error(f"⚠️ 섹터 수급 점수 병합 실패 — 가격 모멘텀만으로 진행: {flow_e}")
 
         return real_stocks
 

@@ -304,6 +304,35 @@ class DbRepository:
             """)
             cursor.execute("INSERT OR IGNORE INTO market_lockout (id, active, since, reason) VALUES (1, 0, NULL, NULL)")
 
+            # 12. sector_flows (업종별 투자자 순매수 — Kiwoom ka10051 일별 적재)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sector_flows (
+                date TEXT NOT NULL,
+                inds_cd TEXT NOT NULL,
+                inds_nm TEXT,
+                mrkt_tp TEXT,
+                frgnr_netprps REAL,
+                orgn_netprps REAL,
+                ind_netprps REAL,
+                PRIMARY KEY (date, inds_cd)
+            )
+            """)
+
+            # 13. sector_prices (전업종지수 + 등락종목수 — Kiwoom ka20003 일별 적재)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sector_prices (
+                date TEXT NOT NULL,
+                inds_cd TEXT NOT NULL,
+                inds_nm TEXT,
+                cur_prc REAL,
+                flu_rt REAL,
+                rising INTEGER,
+                stdns INTEGER,
+                fall INTEGER,
+                PRIMARY KEY (date, inds_cd)
+            )
+            """)
+
             # --- 인덱스 설정 최적화 ---
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON scheduled_tasks (status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time ON scheduled_tasks (scheduled_at)")
@@ -313,6 +342,8 @@ class DbRepository:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_ts ON account_summary (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON system_metrics (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_training_untrained ON training_data (is_trained) WHERE is_trained = 0")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sector_flows_cd ON sector_flows (inds_cd, date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sector_prices_cd ON sector_prices (inds_cd, date)")
 
             # 하이퍼파라미터 초기 값 셋업
             initial_params = [
@@ -744,4 +775,69 @@ class DbRepository:
             if row:
                 return dict(row)
             return {"active": 0, "since": None, "reason": None}
+
+    def save_sector_flow(self, date: str, inds_cd: str, inds_nm: str, mrkt_tp: str,
+                          frgnr_netprps: float, orgn_netprps: float, ind_netprps: float):
+        """업종별 투자자 순매수 일별 데이터를 저장합니다 (upsert)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO sector_flows (date, inds_cd, inds_nm, mrkt_tp, frgnr_netprps, orgn_netprps, ind_netprps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, inds_cd) DO UPDATE SET
+                    inds_nm = excluded.inds_nm, mrkt_tp = excluded.mrkt_tp,
+                    frgnr_netprps = excluded.frgnr_netprps, orgn_netprps = excluded.orgn_netprps,
+                    ind_netprps = excluded.ind_netprps
+            """, (date, inds_cd, inds_nm, mrkt_tp, frgnr_netprps, orgn_netprps, ind_netprps))
+
+    def save_sector_price(self, date: str, inds_cd: str, inds_nm: str, cur_prc: float,
+                           flu_rt: float, rising: int, stdns: int, fall: int):
+        """전업종지수 및 등락종목수 일별 데이터를 저장합니다 (upsert)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO sector_prices (date, inds_cd, inds_nm, cur_prc, flu_rt, rising, stdns, fall)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, inds_cd) DO UPDATE SET
+                    inds_nm = excluded.inds_nm, cur_prc = excluded.cur_prc, flu_rt = excluded.flu_rt,
+                    rising = excluded.rising, stdns = excluded.stdns, fall = excluded.fall
+            """, (date, inds_cd, inds_nm, cur_prc, flu_rt, rising, stdns, fall))
+
+    def get_sector_flow_history(self, inds_cd: str, days: int = 90) -> list:
+        """특정 업종코드의 최근 N일 투자자 순매수 이력을 날짜 오름차순으로 반환합니다."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM (
+                    SELECT date, inds_cd, inds_nm, mrkt_tp, frgnr_netprps, orgn_netprps, ind_netprps
+                    FROM sector_flows WHERE inds_cd = ? ORDER BY date DESC LIMIT ?
+                ) ORDER BY date ASC
+            """, (inds_cd, days))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_sector_price_history(self, inds_cd: str, days: int = 90) -> list:
+        """특정 업종코드의 최근 N일 지수/등락종목수 이력을 날짜 오름차순으로 반환합니다."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM (
+                    SELECT date, inds_cd, inds_nm, cur_prc, flu_rt, rising, stdns, fall
+                    FROM sector_prices WHERE inds_cd = ? ORDER BY date DESC LIMIT ?
+                ) ORDER BY date ASC
+            """, (inds_cd, days))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_sector_codes(self) -> list:
+        """sector_flows에 한 번이라도 적재된 모든 업종코드/업종명 쌍을 반환합니다 (가장 최근 업종명 기준)."""
+        with self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT inds_cd, inds_nm FROM sector_flows sf
+                WHERE date = (SELECT MAX(date) FROM sector_flows WHERE inds_cd = sf.inds_cd)
+                GROUP BY inds_cd
+            """)
+            return [dict(row) for row in cursor.fetchall()]
 

@@ -36,6 +36,10 @@ ETF_TREND = "ETF_TREND"
 # 현재 활성 전략 프로파일 (환경 변수에서 불러오거나 기본값으로 STOCK_MULTIFACTOR 지정)
 ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", STOCK_MULTIFACTOR)
 
+# 섹터 수급 로테이션 신호(core/sector_flow.py)를 industry_score에 병합할지 여부.
+# 초기에는 False로 두고 며칠간 로그(매칭률/z분포)만 관찰한 뒤 켜는 것을 권장한다.
+ENABLE_SECTOR_FLOW_BLEND = os.environ.get("ENABLE_SECTOR_FLOW_BLEND", "false").lower() == "true"
+
 # ETF 유니버스 리스트 (ticker, name)
 ETF_UNIVERSE = [
     ("069500", "KODEX 200"),

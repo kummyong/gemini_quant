@@ -83,6 +83,7 @@ def run_watchdog():
     last_summary_run = None
     last_dart_check_minute = -1  # DART 공시 감시 마지막 실행 시각 (분 단위)
     last_universe_expand = None  # 유니버스 확장 마지막 실행 월
+    last_sector_flow_run = None  # 섹터 수급 수집 마지막 실행일
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -149,6 +150,22 @@ def run_watchdog():
                     log("✨ [Schedule] 일일 마감 보고 전송 완료")
                 except Exception as e:
                     log(f"❌ [Schedule] 일일 마감 보고 전송 실패: {e}")
+
+        # [스케줄링] 섹터 수급 로테이션 신호 수집 (장 운영일 15:50 이후 30분 윈도우 내 한 번만).
+        # 다음날 08:30 전략 엔진 실행(industry_score 계산) 전에 당일치 데이터가 DB에 준비되도록
+        # 일일 마감 보고(15:40) 직후 시간대에 배치한다.
+        sector_flow_target = now.replace(hour=15, minute=50, second=0, microsecond=0)
+        if not is_today_holiday and sector_flow_target <= now < sector_flow_target + timedelta(minutes=30):
+            today_str = now.strftime("%Y-%m-%d")
+            if last_sector_flow_run != today_str:
+                log("📅 [Schedule] 섹터 수급 로테이션 신호 수집 실행")
+                sector_flow_path = os.path.join(BASE_DIR, "stock_trader/core/sector_flow.py")
+                try:
+                    subprocess.run([VENV_PYTHON, sector_flow_path, "--collect"], env=env, check=True, timeout=120)
+                    last_sector_flow_run = today_str
+                    log("✨ [Schedule] 섹터 수급 로테이션 신호 수집 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] 섹터 수급 로테이션 신호 수집 실패: {e}")
 
         # 주말 파라미터 자가 학습은 PC(Trainer Node)에서 처리하므로 모바일 스케줄은 제거함
 
