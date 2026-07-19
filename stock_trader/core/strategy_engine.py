@@ -219,6 +219,13 @@ class StrategyEngine:
         self.ETF_TREND_SMA_PERIOD = int(params["ETF_TREND_SMA_PERIOD"])
         self.ETF_REENTRY_SMA_PERIOD = int(params["ETF_REENTRY_SMA_PERIOD"])
         self.ETF_STOP_COOLDOWN_DAYS = int(params["ETF_STOP_COOLDOWN_DAYS"])
+        
+        from stock_trader.core.risk_manager import RiskManager
+        self.risk_manager = RiskManager(
+            trailing_min_drop=self.TRAILING_MIN_DROP,
+            trailing_max_drop=self.TRAILING_MAX_DROP,
+            chandelier_atr_mult=self.CHANDELIER_ATR_MULT
+        )
 
     def _calculate_adx(self, df, period=14):
         try:
@@ -235,13 +242,20 @@ class StrategyEngine:
         # P3: 거시 파생 지표 수집
         try:
             from stock_trader.core.macro_indicators import MacroIndicatorProvider
-            macro = MacroIndicatorProvider().fetch_vix_disparity()
+            macro_provider = MacroIndicatorProvider()
+            macro = macro_provider.fetch_vix_disparity()
             self.vix_disparity = macro.get("vix_disparity", 0.0)
             if self.vix_disparity >= 20.0:
                 logger.warning(f"🚨 VIX 급등 감지! (20MA 대비 +{self.vix_disparity}%) 시장 패닉 상태 경계")
+                
+            # P4: 시장 국면(Regime) 판독 및 RiskManager 연동
+            self.market_regime = macro_provider.fetch_market_regime()
+            if hasattr(self, 'risk_manager'):
+                self.risk_manager.set_market_regime(self.market_regime)
         except Exception as e:
-            logger.error(f"VIX 파싱 연동 실패: {e}")
+            logger.error(f"거시 지표 수집 실패: {e}")
             self.vix_disparity = 0.0
+            self.market_regime = "NEUTRAL"
             
         self.kospi_return_90d = 0.0
         try:
@@ -803,11 +817,9 @@ class StrategyEngine:
             rsi_val = s_data.get("rsi", 50.0)
             upper_band = s_data.get("upper_band", 999999999.0)
             
-            # 종목별 변동성(ATR%) 로드하여 동적 손절선/트레일링스탑 계산 (Chandelier Exit)
-            # 트레일링은 auto_trader 실시간 감시와 동일한 DB 파라미터를 사용 — 이중 기준 불일치 방지
+            # 종목별 변동성(ATR%) 로드하여 동적 손절선/트레일링스탑 계산 (RiskManager 위임)
             atr_pct = s_data.get("atr_pct", 3.0)
-            dynamic_hard_stop = -max(3.0, min(8.0, 1.5 * atr_pct))
-            dynamic_trailing_stop = max(self.TRAILING_MIN_DROP, min(self.TRAILING_MAX_DROP, self.CHANDELIER_ATR_MULT * atr_pct))
+            dynamic_hard_stop, dynamic_trailing_stop = self.risk_manager.calculate_stops(atr_pct)
             
             if profit <= dynamic_hard_stop:
                 feat = self._build_feature_dict(s_data, {
@@ -1203,7 +1215,7 @@ class StrategyEngine:
                     continue
                     
                 if price > 0 and remaining_cash > 0:
-                    size_factor = max(0.5, min(1.5, 3.0 / atr_pct))
+                    size_factor = self.risk_manager.calculate_size_factor(atr_pct)
                     adjusted_weight = self.TARGET_WEIGHT * size_factor
                     target_amt = min(
                         broker_equity * adjusted_weight,
@@ -1360,7 +1372,7 @@ class StrategyEngine:
 
                 if price > 0 and remaining_cash > 0:
                     score_ratio = (score / total_score_sum) * len(top_5)
-                    size_factor = max(0.5, min(1.5, 3.0 / atr_pct)) * weight_multiplier
+                    size_factor = self.risk_manager.calculate_size_factor(atr_pct) * weight_multiplier
                     adjusted_weight = self.TARGET_WEIGHT * score_ratio * size_factor
                     
                     target_amt = min(
