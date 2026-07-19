@@ -135,18 +135,19 @@ class VectorBacktester:
                 hard_stop_price = pos['buy_price'] * (1.0 - dynamic_hard_pct / 100.0)
                 final_stop_price = max(stop_price, hard_stop_price)
 
-                if today_data['Low'] <= final_stop_price:
-                    # 최소 보유 기간 중에는 트레일링 스탑 무시 (하드 스탑만 작동)
-                    if self.min_hold_days > 0:
-                        buy_dt = pd.Timestamp(pos.get('buy_date', date_str))
-                        days_held = (date - buy_dt).days
-                        if days_held < self.min_hold_days:
-                            # 하드 스탑(절대 손절선)에만 걸리면 매도, 트레일링 스탑이면 스킵
-                            if today_data['Low'] > hard_stop_price:
-                                pos['highest_price'] = max(pos['highest_price'], today_data['High'])
-                                continue
+                # 최소 보유 기간 중에는 트레일링 스탑 라인 자체를 무효화한다 (체결가에도 반영해야
+                # 트레일링 라인의 더 유리한 가격으로 체결되는 낙관 편향이 생기지 않는다).
+                in_grace = False
+                if self.min_hold_days > 0:
+                    buy_dt = pd.Timestamp(pos.get('buy_date', date_str))
+                    days_held = (date - buy_dt).days
+                    in_grace = days_held < self.min_hold_days
+
+                effective_stop_price = hard_stop_price if in_grace else final_stop_price
+
+                if today_data['Low'] <= effective_stop_price:
                     # 갭하락 시 시가 체결, 아니면 스탑 라인 체결
-                    sell_price = min(today_data['Open'], final_stop_price)
+                    sell_price = min(today_data['Open'], effective_stop_price)
                     revenue = sell_price * pos['quantity']
                     revenue *= (1.0 - self.COMMISSION_RATE - self.SELL_TAX_RATE)
                     self.capital += revenue

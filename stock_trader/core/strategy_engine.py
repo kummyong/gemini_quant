@@ -858,12 +858,12 @@ class StrategyEngine:
                 if self._is_within_min_holding(ticker):
                     logger.info(f"⏳ [{b_id}][트레일링 유보] {stock['name']} 매수 후 {self.MIN_HOLDING_DAYS}일 미경과로 트레일링 스탑 유보 (수익률: {profit:.2f}%)")
                 else:
-                feat = self._build_feature_dict(s_data, {
-                    "exit_reason": "trailing_stop",
-                    "profit_rate": profit,
-                    "max_profit_rate": max_profit,
-                    "dynamic_trailing_stop": dynamic_trailing_stop
-                })
+                    feat = self._build_feature_dict(s_data, {
+                        "exit_reason": "trailing_stop",
+                        "profit_rate": profit,
+                        "max_profit_rate": max_profit,
+                        "dynamic_trailing_stop": dynamic_trailing_stop
+                    })
                     sell_signals.append({
                         "broker_id": b_id,
                         "ticker": ticker,
@@ -1366,13 +1366,14 @@ class StrategyEngine:
                 signal_type = "스코어 진입"
                 
                 # BEAR/BULL 국면 비중 조절
+                # BEAR 국면의 비중 축소 자체는 risk_manager.calculate_size_factor()가
+                # 국면별 배수(0.2, 백테스트 검증치)로 이미 적용한다. 여기서는 BEAR_POSITION_FACTOR를
+                # 신규 매수 전면 중지 킬스위치로만 사용하고, 중복 곱셈은 하지 않는다.
                 if regime_now == "BEAR":
                     bear_factor = getattr(self, 'BEAR_POSITION_FACTOR', 0.5)
                     if bear_factor <= 0.0:
                         logger.info(f"⏭️ [{b_name}] {name}: BEAR 국면 신규 매수 전면 중지 (BEAR_POSITION_FACTOR=0)")
                         continue
-                    weight_multiplier *= bear_factor
-                    logger.info(f"🛡️ [{b_name}] {name}: BEAR 국면 매수 비중 {bear_factor:.0%}로 축소 적용")
                 elif regime_now == "BULL":
                     weight_multiplier *= 1.0
                     logger.info(f"🐂 [{b_name}] {name}: BULL 국면 매수 진입 (과접합 방지 위해 비중 확대 1.0x로 유지)")
