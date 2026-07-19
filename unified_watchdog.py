@@ -98,6 +98,7 @@ def run_watchdog():
         os.path.join(BASE_DIR, "stock_trader")
     ]
     env["PYTHONPATH"] = ":".join(system_paths)
+    env["PYTHONIOENCODING"] = "utf-8"
 
     loop_count = 0
 
@@ -283,8 +284,8 @@ def run_watchdog():
                 # 현재 환경 변수와 함께 프로세스 실행
                 full_path = os.path.join(BASE_DIR, p_path)
                 try:
-                    f_out = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stdout.log"), "a")
-                    f_err = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stderr.log"), "a")
+                    f_out = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stdout.log"), "a", encoding="utf-8")
+                    f_err = open(os.path.join(LOG_DIR, f"{p_name.replace(' ', '_')}_stderr.log"), "a", encoding="utf-8")
                     proc = subprocess.Popen(
                         [VENV_PYTHON, full_path],
                         cwd=p_info["cwd"],
