@@ -16,7 +16,7 @@ class MacroIndicatorProvider:
         try:
             # 최근 60일치 데이터 가져오기 (영업일 기준 20MA 계산을 위해 충분히)
             start_date = (datetime.datetime.now() - datetime.timedelta(days=60)).strftime("%Y-%m-%d")
-            df = fdr.DataReader('VIXCLS', data_source='fred', start=start_date)
+            df = fdr.DataReader('FRED:VIXCLS', start=start_date)
             
             if df is not None and not df.empty:
                 df = df.dropna()
