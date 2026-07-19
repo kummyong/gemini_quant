@@ -102,13 +102,15 @@ class NaverFinanceProvider:
             "current_price": current_price
         }
 
-    def fetch_investor_net_buying(self, ticker: str, name: str = "", current_price: float = 0.0) -> Tuple[float, float]:
-        """투자자별 매매동향 페이지에서 최근 5거래일 기관+외국인 순매수 대금(억 원)을 파싱한다.
+    def fetch_investor_net_buying(self, ticker: str, name: str = "", current_price: float = 0.0) -> Tuple[float, float, int]:
+        """투자자별 매매동향 페이지에서 최근 5거래일 기관+외국인 순매수 대금(억 원) 및 연속 순매수 일수를 파싱한다.
 
         current_price가 0.0이면 첫 거래일 종가로 대체한다(기존 동작 유지).
-        반환: (net_buying_억원, current_price)
+        반환: (net_buying_억원, current_price, consecutive_buy_days)
         """
         net_buying = 0.0
+        consecutive_buy_days = 0
+        is_consecutive_broken = False
         try:
             frgn_url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
             res = self.session.get(frgn_url, verify=False, timeout=10)
@@ -132,7 +134,16 @@ class NaverFinanceProvider:
                                 current_price = price_val
                             inst_vol = float(tds[5]) if tds[5] and tds[5] != '-' else 0.0
                             foreign_vol = float(tds[6]) if tds[6] and tds[6] != '-' else 0.0
-                            total_net_buying_krw += (inst_vol + foreign_vol) * price_val
+                            
+                            daily_net_vol = inst_vol + foreign_vol
+                            total_net_buying_krw += daily_net_vol * price_val
+                            
+                            if not is_consecutive_broken:
+                                if daily_net_vol > 0:
+                                    consecutive_buy_days += 1
+                                else:
+                                    is_consecutive_broken = True
+                                    
                             day_count += 1
                             if day_count >= 5:
                                 break
@@ -142,4 +153,4 @@ class NaverFinanceProvider:
         except Exception as e:
             logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
 
-        return net_buying, current_price
+        return net_buying, current_price, consecutive_buy_days

@@ -146,6 +146,21 @@ class MultiFactorScorer:
                 final_score += 10.0
                 logger.info(f"✨ [{stock['name']}] BB 하단 거래량 급감 (VCP 패턴) 포착! 가점 10점 부여")
 
+            # 스마트 머니 매집 보너스 (수급 연속성 + OBV 추세)
+            import stock_trader.config as trader_config
+            if getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
+                consec_days = stock.get("consecutive_buy_days", 0)
+                obv_rising = stock.get("is_obv_rising", False)
+                
+                # 외인/기관 3일 이상 연속 순매수 & OBV 단기 상향 추세일 때 강력한 가점
+                if consec_days >= 3 and obv_rising:
+                    final_score += 15.0
+                    logger.info(f"🔥 [{stock['name']}] 스마트 머니 연속 매집 포착 (3일 이상 연속 순매수 + OBV 우상향)! 가점 15점 부여")
+                # OBV는 약하더라도 연속 순매수 자체가 4일 이상이면 가점
+                elif consec_days >= 4:
+                    final_score += 8.0
+                    logger.info(f"💧 [{stock['name']}] 외인/기관 연속 매집 ({consec_days}일)! 가점 8점 부여")
+
             stock["total_score"] = round(final_score, 2)
 
         return sorted(stocks, key=lambda x: x["total_score"], reverse=True)

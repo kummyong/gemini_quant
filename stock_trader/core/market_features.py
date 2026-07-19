@@ -30,7 +30,8 @@ def compute_technical_features(df_hist: pd.DataFrame, current_price: float, bb_s
         "is_aligned": False,
         "is_under_ma120": False,
         "is_vcp": False,
-        "return_5d": 0.0
+        "return_5d": 0.0,
+        "is_obv_rising": False
     }
     try:
         if not df_hist.empty and len(df_hist) >= 20:
@@ -88,6 +89,9 @@ def compute_technical_features(df_hist: pd.DataFrame, current_price: float, bb_s
                 feats["return_5d"] = ((closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6]) * 100
             else:
                 feats["return_5d"] = 0.0
+
+            # 9. OBV 상승 추세 판단
+            feats["is_obv_rising"] = ind.is_obv_rising(df_hist)
 
     except Exception as tech_e:
         logger.warning(f"[{name}] 기술 지표 계산 실패: {tech_e}")

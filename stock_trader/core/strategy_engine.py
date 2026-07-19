@@ -362,6 +362,7 @@ class StrategyEngine:
             eps_growth = 0.0
             industry_name = "기타"
             net_buying = 0.0
+            consecutive_buy_days = 0
             current_price = 0.0
             
             dart_revenue_growth = 0.0
@@ -405,7 +406,7 @@ class StrategyEngine:
                     logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
 
                 # 네이버 금융 크롤링 (기관/외국인 수급)
-                net_buying, current_price = self.naver.fetch_investor_net_buying(ticker, name, current_price)
+                net_buying, current_price, consecutive_buy_days = self.naver.fetch_investor_net_buying(ticker, name, current_price)
 
                 if self.dart_scorer:
                     try:
@@ -440,6 +441,7 @@ class StrategyEngine:
                 "eps_growth": eps_growth,
                 "industry_name": industry_name,
                 "net_buying": net_buying,
+                "consecutive_buy_days": consecutive_buy_days,
                 "price": current_price,
                 "dart_revenue_growth": dart_revenue_growth,
                 "dart_op_growth": dart_op_growth,
@@ -589,11 +591,13 @@ class StrategyEngine:
                 "is_under_ma120": bool(to_python_type(s.get("is_under_ma120", False), False)),
                 "is_vcp": bool(to_python_type(s.get("is_vcp", False), False)),
                 "momentum_5d": float(to_python_type(s.get("return_5d", 0.0), 0.0)),
-                "relative_momentum": float(to_python_type(s.get("relative_momentum", 0.0), 0.0))
+                "relative_momentum": float(to_python_type(s.get("relative_momentum", 0.0), 0.0)),
+                "is_obv_rising": bool(to_python_type(s.get("is_obv_rising", False), False))
             },
             "fundamental": {
                 "eps_growth": float(to_python_type(s.get("eps_growth", 0.0), 0.0)),
                 "net_buying": float(to_python_type(s.get("net_buying", 0.0), 0.0)),
+                "consecutive_buy_days": int(to_python_type(s.get("consecutive_buy_days", 0), 0)),
                 "dart_revenue_growth": float(to_python_type(s.get("dart_revenue_growth", 0.0), 0.0)),
                 "dart_op_growth": float(to_python_type(s.get("dart_op_growth", 0.0), 0.0)),
                 "dart_debt_ratio": float(to_python_type(s.get("dart_debt_ratio", 100.0), 100.0)),

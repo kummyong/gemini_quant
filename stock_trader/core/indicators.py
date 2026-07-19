@@ -66,3 +66,24 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     minus_di = 100 * (minus_dm.rolling(window=period).mean() / (tr_smooth + 1e-9))
     dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9))
     return dx.rolling(window=period).mean()
+
+def obv(df: pd.DataFrame) -> pd.Series:
+    """OBV (On-Balance Volume) 계산"""
+    if df.empty or len(df) < 2:
+        return pd.Series(0.0, index=df.index)
+    close = df['Close']
+    volume = df['Volume']
+    
+    # 주가 상승시 거래량 양수, 하락시 음수, 보합시 0
+    direction = np.sign(close.diff()).fillna(0)
+    obv_val = (volume * direction).cumsum()
+    return obv_val
+
+def is_obv_rising(df: pd.DataFrame, short_window: int = 5, long_window: int = 20) -> bool:
+    """OBV의 단기(5일) 이동평균이 장기(20일) 이동평균을 상회하고 있는지 (상승 추세 판단)"""
+    if len(df) < long_window:
+        return False
+    obv_series = obv(df)
+    obv_short = obv_series.rolling(window=short_window).mean().iloc[-1]
+    obv_long = obv_series.rolling(window=long_window).mean().iloc[-1]
+    return obv_short > obv_long

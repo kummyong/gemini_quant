@@ -40,6 +40,9 @@ ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", STOCK_MULTIFACTOR)
 # 초기에는 False로 두고 며칠간 로그(매칭률/z분포)만 관찰한 뒤 켜는 것을 권장한다.
 ENABLE_SECTOR_FLOW_BLEND = os.environ.get("ENABLE_SECTOR_FLOW_BLEND", "false").lower() == "true"
 
+# 스마트 머니 매집 보너스 (외인/기관 수급 연속성 + OBV 추세) 적용 여부.
+ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "true").lower() == "true"
+
 # ETF 유니버스 리스트 (ticker, name)
 ETF_UNIVERSE = [
     ("069500", "KODEX 200"),
