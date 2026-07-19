@@ -855,7 +855,7 @@ class StrategyEngine:
                     "features": json.dumps(feat, ensure_ascii=False)
                 })
                 logger.info(f"🎯 [{b_id}][트레일링스탑] {stock['name']} 수익 확정 전량 청산 (고점: {max_profit:.2f}%, 현재: {profit:.2f}%)")
-            elif (rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band) and not stock.get("is_runner", False):
+            elif self.market_regime != "BULL" and (rsi_val >= self.RSI_SELL_THRES or current_price >= upper_band) and not stock.get("is_runner", False):
                 # 러너 관리: 오버슈팅 시 일부만 익절하고 잔여 물량은 러너로 전환하여
                 # 트레일링/하드스탑으로만 관리한다 (러너는 오버슈팅 재발동 제외).
                 # backtest_multifactor O1 검증: 트레일링 청산 평균 +0.33% -> +8.25%, Sharpe 0.89 -> 1.07.

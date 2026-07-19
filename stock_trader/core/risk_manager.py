@@ -32,6 +32,10 @@ class RiskManager:
             # 대세 상승장: 트레일링 스탑 이완 (존버 모드)
             mult = 5.0
             max_drop = 25.0
+        elif self.market_regime == "BEAR":
+            # 대세 하락장: 트레일링 스탑 타이트하게 (칼손절 방어 모드)
+            mult = 1.5
+            max_drop = 8.0
             
         dynamic_trailing_stop = max(self.TRAILING_MIN_DROP, min(max_drop, mult * atr))
         
@@ -48,5 +52,8 @@ class RiskManager:
         if self.market_regime == "BULL":
             # 대세 상승장: 매수 비중 상향 (1.5배 레버리지 팩터)
             size_factor *= 1.5
+        elif self.market_regime == "BEAR":
+            # 대세 하락장: 매수 비중 하향 (절반 수준으로 방어적 운용)
+            size_factor *= 0.5
             
         return size_factor

@@ -120,7 +120,7 @@ def run_watchdog():
         if ACTIVE_STRATEGY_PROFILE == ETF_TREND:
             target_hour, target_minute = 15, 45  # 장 마감 후 1일 1회 실행
         else:
-            target_hour, target_minute = 8, 30   # 개장 전 실행
+            target_hour, target_minute = 15, 0   # 종가 베팅(15:00)으로 변경 (실시간 체결강도/수급 활용)
             
         # 정각(분) 일치 대신 30분 윈도우: 직전 작업이 오래 걸려 해당 분을 놓쳐도 실행됨
         strategy_target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
