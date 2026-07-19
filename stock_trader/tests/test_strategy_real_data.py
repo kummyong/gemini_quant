@@ -188,6 +188,7 @@ class TestStrategyEngineRealData(unittest.TestCase):
         # Chandelier 트레일링 기준: threshold = clamp(CHANDELIER_ATR_MULT * atr_pct,
         # TRAILING_MIN_DROP, TRAILING_MAX_DROP). 기본 하이퍼파라미터(2.5/2.0/8.0)에 대해
         # market_data로 atr_pct를 명시해 기대 임계값을 결정론적으로 만든다.
+        # (엔진 파라미터를 테스트에서 덮어쓰면 운영 기본값의 회귀를 감지하지 못한다)
         # atr_pct=1.6 -> threshold = max(2.0, min(8.0, 4.0)) = 4.0%p
         market_data = [{"ticker": "005930", "atr_pct": 1.6}]
 
