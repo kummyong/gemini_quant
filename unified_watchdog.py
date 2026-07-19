@@ -85,6 +85,8 @@ def run_watchdog():
     last_universe_expand = None  # 유니버스 확장 마지막 실행 월
     last_sector_flow_run = None  # 섹터 수급 수집 마지막 실행일
     last_smart_money_run = None  # 스마트 머니 수집 마지막 실행일
+    last_db_backup_run = None    # DB 백업 마지막 실행일
+    last_holiday_warn_month = None  # 휴장일 테이블 점검 경보 마지막 발송 월
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -182,6 +184,38 @@ def run_watchdog():
                     log("✨ [Schedule] 스마트 머니 수집 완료")
                 except Exception as e:
                     log(f"❌ [Schedule] 스마트 머니 수집 실패: {e}")
+
+        # [스케줄링] DB 백업 (장 운영일 16:20 이후 30분 윈도우 내 한 번만 — 일일 배치들이 끝난 뒤)
+        db_backup_target = now.replace(hour=16, minute=20, second=0, microsecond=0)
+        if not is_today_holiday and db_backup_target <= now < db_backup_target + timedelta(minutes=30):
+            today_str = now.strftime("%Y-%m-%d")
+            if last_db_backup_run != today_str:
+                log("📅 [Schedule] DB 일일 백업 실행")
+                backup_path = os.path.join(BASE_DIR, "stock_trader/scripts/backup_db.py")
+                try:
+                    subprocess.run([VENV_PYTHON, backup_path], env=env, check=True, timeout=300)
+                    last_db_backup_run = today_str
+                    log("✨ [Schedule] DB 일일 백업 완료")
+                except Exception as e:
+                    log(f"❌ [Schedule] DB 백업 실패: {e}")
+                    try:
+                        send_telegram_message(f"🚨 [System] DB 일일 백업 실패: {e}")
+                    except Exception:
+                        pass
+
+        # [스케줄링] KRX 휴장일 테이블 소진 점검 (매월 1일 09시, 월 1회 경보)
+        if now.day == 1 and now.hour == 9:
+            current_month = now.strftime("%Y-%m")
+            if last_holiday_warn_month != current_month:
+                last_holiday_warn_month = current_month
+                try:
+                    from stock_trader.core.korean_market_calendar import holiday_table_warning
+                    warn_msg = holiday_table_warning(now)
+                    if warn_msg:
+                        log(warn_msg)
+                        send_telegram_message(f"[System] {warn_msg}")
+                except Exception as e:
+                    log(f"⚠️ 휴장일 테이블 점검 실패: {e}")
 
         # 주말 파라미터 자가 학습은 PC(Trainer Node)에서 처리하므로 모바일 스케줄은 제거함
 

@@ -32,6 +32,22 @@ def is_market_holiday(dt: datetime.datetime) -> bool:
     date_str = dt.strftime("%Y-%m-%d")
     return date_str in KRX_HOLIDAYS
 
+def holiday_table_warning(dt: datetime.datetime) -> str:
+    """KRX_HOLIDAYS 하드코딩 테이블의 소진 임박/소진 여부를 점검한다.
+
+    테이블에 없는 연도는 주말만 휴장으로 처리되어 공휴일에 개장일로 오판된다
+    (전략 엔진이 헛돌고 서킷브레이커 지수 조회가 오래된 데이터를 보게 됨).
+    경고가 필요하면 메시지 문자열, 정상이면 빈 문자열을 반환한다."""
+    years = {int(h[:4]) for h in KRX_HOLIDAYS}
+    if dt.year not in years:
+        return (f"🚨 [긴급] KRX 휴장일 테이블에 올해({dt.year}년) 데이터가 없습니다! "
+                f"공휴일이 개장일로 오판됩니다. korean_market_calendar.py를 즉시 갱신하세요.")
+    if dt.month >= 11 and (dt.year + 1) not in years:
+        return (f"⚠️ KRX 휴장일 테이블에 내년({dt.year + 1}년) 데이터가 없습니다. "
+                f"연말 전에 korean_market_calendar.py에 KRX 휴장일을 추가하세요.")
+    return ""
+
+
 def is_first_trading_day_of_month(dt: datetime.datetime) -> bool:
     """
     dt가 해당 월의 첫 거래일(주말/휴장일 제외)이면 True 반환.
