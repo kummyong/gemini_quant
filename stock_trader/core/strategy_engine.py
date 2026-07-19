@@ -364,8 +364,10 @@ class StrategyEngine:
             raw_stocks_data.append((ticker, name, df_hist))
             time.sleep(0.1) # Termux 리소스 방어용 짧은 대기
 
+        # 내부자 매수 조회는 가점 활성화 여부와 무관하게 항상 수행한다 — 진입 스냅샷(features)에
+        # has_insider_buying이 기록되어야 factor_analysis(IC)가 가점 없이도 예측력 증거를 쌓을 수 있다.
         recent_insider_buying_tickers = set()
-        if self.repo and getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
+        if self.repo:
             try:
                 recent_insider_buying_tickers = self.repo.get_recent_insider_buying_tickers(days=5)
                 if recent_insider_buying_tickers:

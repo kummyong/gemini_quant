@@ -40,8 +40,12 @@ ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", STOCK_MULTIFACTOR)
 # 초기에는 False로 두고 며칠간 로그(매칭률/z분포)만 관찰한 뒤 켜는 것을 권장한다.
 ENABLE_SECTOR_FLOW_BLEND = os.environ.get("ENABLE_SECTOR_FLOW_BLEND", "false").lower() == "true"
 
-# 스마트 머니 매집 보너스 (외인/기관 수급 연속성 + OBV 추세) 적용 여부.
-ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "true").lower() == "true"
+# 스마트 머니 매집 보너스 (내부자 장내매수 + 수급 연속성/OBV + 센티먼트/미시구조) 적용 여부.
+# 가점 합이 종목당 최대 ±수십 점으로 기존 가중합 팩터 모델을 지배할 수 있는 크기라,
+# trade_outcomes/IC 분석으로 예측력이 확인되기 전까지는 기본 비활성화한다.
+# (비활성화 상태에서도 has_insider_buying/consecutive_buy_days는 진입 스냅샷에 계속 기록되어
+#  factor_analysis가 검증 증거를 축적한다)
+ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "false").lower() == "true"
 
 # ETF 유니버스 리스트 (ticker, name)
 ETF_UNIVERSE = [
