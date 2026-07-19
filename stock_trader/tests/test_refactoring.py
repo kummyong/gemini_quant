@@ -174,7 +174,7 @@ class TestRefactoring(unittest.TestCase):
     def test_06_summary_trader_telegram_formatting(self):
         """Test daily summary telegram message formatting with mock DB data"""
         from unittest.mock import patch
-        import stock_trader.core.summary_trader as summary_trader
+        import stock_trader.archive.summary_trader as summary_trader
         import stock_trader.config as config
         import datetime
         
@@ -220,8 +220,8 @@ class TestRefactoring(unittest.TestCase):
 
                 
             # 실계좌 조회는 실패한 것으로 두고, DB 폴백 경로의 포맷을 검증
-            with patch('stock_trader.core.summary_trader.send_telegram_message') as mock_send, \
-                 patch('stock_trader.core.summary_trader._fetch_live_account_data', return_value=None):
+            with patch('stock_trader.archive.summary_trader.send_telegram_message') as mock_send, \
+                 patch('stock_trader.archive.summary_trader._fetch_live_account_data', return_value=None):
                 summary_trader.send_daily_summary_to_telegram()
                 
                 # 호출이 한 번 발생했는지 검증

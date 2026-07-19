@@ -99,6 +99,7 @@ class StrategyEngine:
         self.scorer = MultiFactorScorer()
         self._init_dart()
         self._load_hyperparams()
+        self.market_regime = "NEUTRAL"
 
     def _fetch_account_equity(self):
         """모든 활성 증권사 API에서 실제 총자산과 예수금을 개별 조회하여 동적으로 설정합니다."""

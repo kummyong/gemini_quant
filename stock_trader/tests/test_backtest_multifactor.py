@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from stock_trader.core.backtest_multifactor import (
+from stock_trader.archive.backtest_multifactor import (
     BacktestConfig, MultiFactorBacktester, run_backtest
 )
 
@@ -149,7 +149,7 @@ def test_bear_regime_uses_stricter_threshold_and_reduced_size():
 def test_replacement_discipline_gates():
     """min_holding_days / replacement_grace_days가 교체 매도를 게이트해야 한다.
     리스크 청산이 아닌 replacement에만 적용된다."""
-    from stock_trader.core.backtest_multifactor import Position
+    from stock_trader.archive.backtest_multifactor import Position
 
     kospi = make_kospi_bull()
     stock = make_ohlcv([10000.0] * 260)
@@ -184,7 +184,7 @@ def test_replacement_discipline_gates():
 def test_overshoot_partial_exit_creates_runner():
     """overshoot_exit_fraction < 1.0이면 오버슈팅 시 부분 익절 후 잔여 물량이
     러너로 전환되고, 러너에는 오버슈팅이 재발동하지 않아야 한다."""
-    from stock_trader.core.backtest_multifactor import Position
+    from stock_trader.archive.backtest_multifactor import Position
 
     kospi = make_kospi_bull()
     stock = make_ohlcv([12000.0] * 260)
