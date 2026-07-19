@@ -184,3 +184,45 @@ class NaverFinanceProvider:
             
         return post_count
 
+    def fetch_market_microstructure(self, ticker: str) -> Dict:
+        """종목 시세/호가 페이지에서 체결강도와 총 매도/매수 잔량을 크롤링한다.
+        반환: {"volume_strength": float, "ask_volume": int, "bid_volume": int}
+        """
+        result = {"volume_strength": 100.0, "ask_volume": 0, "bid_volume": 0}
+        try:
+            # 체결강도 파싱 (sise.naver)
+            sise_url = f"https://finance.naver.com/item/sise.naver?code={ticker}"
+            res = self.session.get(sise_url, verify=False, timeout=10)
+            res.encoding = 'euc-kr'
+            
+            # 정규식으로 체결강도 찾기
+            match_vs = re.search(r'체결강도.*?<span class="tah p11.*?">([0-9.,]+)%?</span>', res.text, re.DOTALL | re.IGNORECASE)
+            if not match_vs:
+                # 다른 구조 시도 (id 기반)
+                match_vs = re.search(r'id="_cns_TradeStrong">([0-9.,]+)', res.text)
+                
+            if match_vs:
+                result["volume_strength"] = float(match_vs.group(1).replace(',', ''))
+                
+            # 호가잔량 파싱 (sise_ask.naver) - iframe 내용
+            ask_url = f"https://finance.naver.com/item/sise_ask.naver?code={ticker}"
+            res_ask = self.session.get(ask_url, verify=False, timeout=10)
+            res_ask.encoding = 'euc-kr'
+            
+            # 호가테이블 가장 아래 총잔량 행
+            # 보통 "총잔량" 텍스트 근처의 숫자들
+            soup_ask = BeautifulSoup(res_ask.text, 'lxml')
+            total_tr = soup_ask.find('td', string=re.compile('총잔량'))
+            if total_tr and total_tr.parent:
+                tds = total_tr.parent.find_all('td')
+                if len(tds) >= 3:
+                    try:
+                        result["ask_volume"] = int(tds[0].get_text(strip=True).replace(',', ''))
+                        result["bid_volume"] = int(tds[2].get_text(strip=True).replace(',', ''))
+                    except ValueError:
+                        pass
+        except Exception as e:
+            logger.error(f"[{ticker}] 미시구조 크롤링 실패: {e}")
+            
+        return result
+

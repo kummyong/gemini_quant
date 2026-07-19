@@ -226,8 +226,20 @@ class StrategyEngine:
             return 25.0
 
     def _determine_market_regime(self):
-        """KOSPI 50일 이동평균선 및 ADX 지표를 기준으로 BULL/BEAR/SIDEWAY 국면을 판독하고 파라미터를 설정합니다."""
-        logger.info("📈 실시간 KOSPI(KS11) 국면 판독 시작...")
+        """KOSPI 50일 이동평균선 및 ADX 지표, VIX 괴리율을 기준으로 BULL/BEAR/SIDEWAY 국면을 판독합니다."""
+        logger.info("📈 실시간 KOSPI(KS11) 및 VIX 국면 판독 시작...")
+        
+        # P3: 거시 파생 지표 수집
+        try:
+            from stock_trader.core.macro_indicators import MacroIndicatorProvider
+            macro = MacroIndicatorProvider().fetch_vix_disparity()
+            self.vix_disparity = macro.get("vix_disparity", 0.0)
+            if self.vix_disparity >= 20.0:
+                logger.warning(f"🚨 VIX 급등 감지! (20MA 대비 +{self.vix_disparity}%) 시장 패닉 상태 경계")
+        except Exception as e:
+            logger.error(f"VIX 파싱 연동 실패: {e}")
+            self.vix_disparity = 0.0
+            
         self.kospi_return_90d = 0.0
         try:
             import FinanceDataReader as fdr
@@ -1045,14 +1057,16 @@ class StrategyEngine:
         market_data = self.fetch_market_data()
         scored_stocks = self.calculate_scores(market_data)
 
-        # P2: 검색 트렌드/센티먼트 수집 (상위 50개 종목 대상)
+        # P2/P3: 비정형 센티먼트 및 미시구조 지표 수집 (상위 50개 종목 대상)
         import stock_trader.config as trader_config
         if self.profile != ETF_TREND and getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
-            logger.info("💬 상위 50개 종목 대상 종목토론방 트래픽(센티먼트) 수집 시작...")
+            logger.info("💬 상위 50개 종목 대상 센티먼트 및 미시구조 지표 수집 시작...")
             for s in scored_stocks[:50]:
                 traffic = self.naver.fetch_discussion_traffic(s["ticker"])
+                micro = self.naver.fetch_market_microstructure(s["ticker"])
                 s["discussion_traffic"] = traffic
-            # 센티먼트가 업데이트된 종목들을 대상으로 재채점 및 정렬
+                s.update(micro)  # volume_strength, ask_volume, bid_volume 병합
+            # 지표가 업데이트된 종목들을 대상으로 재채점 및 정렬
             scored_stocks = self.calculate_scores(scored_stocks)
 
         top_5 = scored_stocks[:self.TOP_N]

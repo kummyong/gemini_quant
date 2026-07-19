@@ -179,6 +179,27 @@ class MultiFactorScorer:
                         final_score -= 10.0
                         logger.warning(f"⚠️ [{stock['name']}] 개인 쏠림(Retail Frenzy) 경고 (게시글 {traffic}건, 수급이탈)! 감점 10점 부여")
 
+                # 5. 미시구조 지표 (체결강도 및 호가 잔량 불균형 OBI)
+                if "volume_strength" in stock and "ask_volume" in stock and "bid_volume" in stock:
+                    vs = stock["volume_strength"]
+                    ask_v = stock["ask_volume"]
+                    bid_v = stock["bid_volume"]
+                    
+                    # 체결강도 가점: 100% 이상이면 매수세 우위 (최대 10점)
+                    if vs > 100.0:
+                        vs_bonus = min(10.0, (vs - 100.0) * 0.2)
+                        final_score += vs_bonus
+                        logger.info(f"💪 [{stock['name']}] 강한 체결강도 ({vs}%) 포착! 가점 {vs_bonus:.2f}점 부여")
+                    
+                    # 호가 잔량 불균형(OBI): 한국 시장 특성상 매도 잔량이 매수 잔량보다 많으면 상승 신호.
+                    if ask_v > 0 and bid_v > 0:
+                        if ask_v >= bid_v * 1.5:
+                            final_score += 8.0
+                            logger.info(f"🧱 [{stock['name']}] 매도 호가벽 형성(매도잔량 우위)! 상승 돌파 기대 가점 8점 부여")
+                        elif bid_v >= ask_v * 1.5:
+                            final_score -= 5.0
+                            logger.warning(f"📉 [{stock['name']}] 매수 호가벽 빽빽함(하방 압력)! 감점 5점 부여")
+
             stock["total_score"] = round(final_score, 2)
 
         return sorted(stocks, key=lambda x: x["total_score"], reverse=True)
