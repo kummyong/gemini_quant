@@ -167,6 +167,18 @@ class MultiFactorScorer:
                     final_score += 8.0
                     logger.info(f"💧 [{stock['name']}] 외인/기관 연속 매집 ({consec_days}일)! 가점 8점 부여")
 
+                # 4. 종목토론방 센티먼트 (조용한 매집 vs 개인 쏠림)
+                if "discussion_traffic" in stock:
+                    traffic = stock["discussion_traffic"]
+                    net_buying_val = stock.get("net_buying", 0.0)
+                    
+                    if traffic <= 5 and net_buying_val > 0:
+                        final_score += 5.0
+                        logger.info(f"🤫 [{stock['name']}] 조용한 매집 포착 (게시글 {traffic}건, 수급유입)! 가점 5점 부여")
+                    elif traffic >= 50 and net_buying_val <= 0:
+                        final_score -= 10.0
+                        logger.warning(f"⚠️ [{stock['name']}] 개인 쏠림(Retail Frenzy) 경고 (게시글 {traffic}건, 수급이탈)! 감점 10점 부여")
+
             stock["total_score"] = round(final_score, 2)
 
         return sorted(stocks, key=lambda x: x["total_score"], reverse=True)

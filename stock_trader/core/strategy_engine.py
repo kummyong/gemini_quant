@@ -1044,6 +1044,17 @@ class StrategyEngine:
         
         market_data = self.fetch_market_data()
         scored_stocks = self.calculate_scores(market_data)
+
+        # P2: 검색 트렌드/센티먼트 수집 (상위 50개 종목 대상)
+        import stock_trader.config as trader_config
+        if self.profile != ETF_TREND and getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
+            logger.info("💬 상위 50개 종목 대상 종목토론방 트래픽(센티먼트) 수집 시작...")
+            for s in scored_stocks[:50]:
+                traffic = self.naver.fetch_discussion_traffic(s["ticker"])
+                s["discussion_traffic"] = traffic
+            # 센티먼트가 업데이트된 종목들을 대상으로 재채점 및 정렬
+            scored_stocks = self.calculate_scores(scored_stocks)
+
         top_5 = scored_stocks[:self.TOP_N]
         top_tickers = [s["ticker"] for s in top_5]
 

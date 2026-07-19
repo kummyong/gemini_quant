@@ -154,3 +154,33 @@ class NaverFinanceProvider:
             logger.error(f"[{name}] 수급 정보 파싱 실패: {e}")
 
         return net_buying, current_price, consecutive_buy_days
+
+    def fetch_discussion_traffic(self, ticker: str) -> int:
+        """종목토론방 1페이지(최상단) 내 당일 작성된 게시글 수를 크롤링한다.
+        군중 센티먼트(관심도)의 대용 지표로 사용된다.
+        
+        반환: int (당일 작성된 게시글 수)
+        """
+        import datetime
+        post_count = 0
+        try:
+            board_url = f"https://finance.naver.com/item/board.naver?code={ticker}"
+            res = self.session.get(board_url, verify=False, timeout=10)
+            res.encoding = 'euc-kr'
+            soup = BeautifulSoup(res.text, 'lxml')
+            
+            board_table = soup.find('table', class_='type2')
+            if board_table:
+                today_str = datetime.datetime.now().strftime("%Y.%m.%d")
+                for tr in board_table.find_all('tr'):
+                    tds = tr.find_all('td')
+                    if len(tds) >= 6:
+                        date_text = tds[0].get_text(strip=True)
+                        # 네이버 종목토론실은 'YYYY.MM.DD HH:MM' 형식을 띠므로 당일 날짜 포함 여부 체크
+                        if today_str in date_text: 
+                            post_count += 1
+        except Exception as e:
+            logger.error(f"[{ticker}] 종목토론방 트래픽 크롤링 실패: {e}")
+            
+        return post_count
+
