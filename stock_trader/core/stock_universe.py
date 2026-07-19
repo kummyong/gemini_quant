@@ -44,35 +44,31 @@ STOCK_MAP = {
     "진에어": "272450", "대한항공": "003490", "아시아나": "020560",
 }
 
-# 전략 엔진용 타겟 종목 리스트 (ticker, name)
-SAMPLE_TICKERS = [
-    ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"),
-    ("035420", "NAVER"), ("035720", "카카오"), ("000270", "기아"),
-    ("005490", "POSCO홀딩스"), ("105560", "KB금융"), ("068270", "셀트리온"),
-    ("000810", "삼성화재"), ("051910", "LG화학"), ("032830", "삼성생명"),
-    ("015760", "한국전력"), ("033780", "KT&G"), ("003550", "LG"),
-    ("000100", "유한양행"), ("000700", "유수홀딩스"), ("017940", "E1"),
-    ("277810", "레인보우로보틱스"), ("465770", "STX그린로지스"),
-    
-    # 추가된 종목군
-    ("373220", "LG에너지솔루션"), ("207940", "삼성바이오로직스"), ("086520", "에코프로"),
-    ("247540", "에코프로비엠"), ("042700", "한미반도체"), ("058470", "리노공업"),
-    ("055550", "신한지주"), ("012330", "현대모비스"), ("066570", "LG전자"),
-    ("028260", "삼성물산"),
-]
+def get_dynamic_universe(top_n=30):
+    """
+    실시간으로 KOSPI 시가총액 상위 종목을 추출하여 반환합니다.
+    (우선주, 스팩, 리츠 제외)
+    """
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing('KOSPI')
+        # 우선주 제외 (코드가 0으로 끝나는 본주만)
+        df = df[df['Code'].str.endswith('0')]
+        # 스팩, 리츠 제외
+        df = df[~df['Name'].str.contains('스팩|리츠')]
+        
+        df_sorted = df.sort_values(by='Marcap', ascending=False).head(top_n)
+        
+        tickers = []
+        for _, row in df_sorted.iterrows():
+            ticker, name = row['Code'], row['Name']
+            tickers.append((ticker, name))
+            STOCK_MAP[name] = ticker # STOCK_MAP에도 동적 추가
+            
+        return tickers
+    except Exception as e:
+        print(f"Dynamic universe fetch failed: {e}")
+        return []
 
-# 로컬 JSON에서 동적으로 추가된 유니버스 로드 및 병합
-try:
-    STOCK_TRADER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    JSON_PATH = os.path.join(STOCK_TRADER_DIR, "logs", "active_universe.json")
-    if os.path.exists(JSON_PATH):
-        with open(JSON_PATH, "r", encoding="utf-8") as f:
-            dynamic_data = json.load(f)
-            for item in dynamic_data.get("tickers", []):
-                ticker = item["ticker"]
-                name = item["name"]
-                if ticker not in [t[0] for t in SAMPLE_TICKERS]:
-                    SAMPLE_TICKERS.append((ticker, name))
-                    STOCK_MAP[name] = ticker
-except Exception:
-    pass
+# 전략 엔진용 타겟 종목 리스트 (실시간 Top 30 자동 추출)
+SAMPLE_TICKERS = get_dynamic_universe(30)

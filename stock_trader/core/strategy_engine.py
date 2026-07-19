@@ -1330,45 +1330,29 @@ class StrategyEngine:
                 score = s["total_score"]
                 atr_pct = s.get("atr_pct", 3.0)
                 
-                is_rsi_match = rsi_val <= self.RSI_BUY_THRES
-                is_bb_match = (lower_band > 0) and (price <= lower_band)
-                is_mean_reversion = is_rsi_match or is_bb_match
+                regime_now = getattr(self, 'market_regime', 'NEUTRAL')
                 
-                regime_now = getattr(self, 'current_regime', '')
-                is_trend_following = (
-                    regime_now in ("BULL", "SIDEWAY") and
-                    s.get("is_aligned", False) and
-                    self.TF_RSI_MIN <= rsi_val <= self.TF_RSI_MAX and
-                    s.get("relative_momentum", 0.0) > self.TF_REL_MOMENTUM_MIN and
-                    s.get("is_bottoming", True)
-                )
-                
-                if is_mean_reversion:
-                    signal_type = "역추세"
-                    weight_multiplier = 1.0
-                    if is_rsi_match and not is_bb_match and not s.get("is_bottoming", True):
-                        logger.info(f"⏭️ [{b_name}] {name}: RSI 조건 부합하나 하락세 미멈춤으로 매수 스킵")
-                        continue
-                elif is_trend_following:
-                    weight_multiplier = 0.5 if regime_now == "SIDEWAY" else 0.7
-                    signal_type = f"추세추종({'SIDEWAY' if regime_now == 'SIDEWAY' else 'BULL'})"
-                    logger.info(f"📈 [{b_name}] {name}: 추세추종 진입 조건 부합 (RSI: {rsi_val:.1f}, MA정배열, 상대강도: {s.get('relative_momentum', 0.0):+.1f}%, 국면: {regime_now})")
-                else:
-                    logger.info(
-                        f"⏭️ [{b_name}] {name}: 매수 조건 미충족 "
-                        f"(RSI: {rsi_val:.1f} | 역추세RSI≤{self.RSI_BUY_THRES} | BB하단: {is_bb_match} | "
-                        f"MA정배열: {s.get('is_aligned', False)} | 상대강도: {s.get('relative_momentum', 0.0):+.1f}% | 국면: {regime_now})"
-                    )
+                # 점수가 기준점(60점) 이상이면 매수 승인 (과최적화 제약조건 철폐)
+                if score < 60.0:
+                    logger.info(f"⏭️ [{b_name}] {name}: 점수 미달 (Score: {score:.1f} < 60.0)")
                     continue
-
-                # BEAR 국면 방어: 역추세 매수 비중 축소 (추세추종은 위에서 이미 BULL/SIDEWAY 한정)
-                if regime_now.startswith("BEAR"):
+                    
+                weight_multiplier = 1.0
+                signal_type = "스코어 진입"
+                
+                # BEAR/BULL 국면 비중 조절
+                if regime_now == "BEAR":
                     bear_factor = getattr(self, 'BEAR_POSITION_FACTOR', 0.5)
                     if bear_factor <= 0.0:
                         logger.info(f"⏭️ [{b_name}] {name}: BEAR 국면 신규 매수 전면 중지 (BEAR_POSITION_FACTOR=0)")
                         continue
                     weight_multiplier *= bear_factor
                     logger.info(f"🛡️ [{b_name}] {name}: BEAR 국면 매수 비중 {bear_factor:.0%}로 축소 적용")
+                elif regime_now == "BULL":
+                    weight_multiplier *= 1.5
+                    logger.info(f"🐂 [{b_name}] {name}: BULL 국면 매수 비중 확대 적용 (1.5x)")
+                    
+                logger.info(f"📈 [{b_name}] {name}: 종합 점수 진입 조건 부합 (Score: {score:.1f}, 국면: {regime_now})")
 
                 if price > 0 and remaining_cash > 0:
                     score_ratio = (score / total_score_sum) * len(top_5)

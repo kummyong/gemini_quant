@@ -62,9 +62,20 @@ class VectorBacktester:
         self.vix_data['VIX_MA20'] = self.vix_data['VIXCLS'].rolling(20).mean()
         self.vix_data['VIX_Disparity'] = ((self.vix_data['VIXCLS'] - self.vix_data['VIX_MA20']) / self.vix_data['VIX_MA20']) * 100
         
-        logger.info(f"Downloading Benchmark (KOSPI)...")
+        logger.info(f"Downloading Benchmark (KOSPI) & Calculating Market Regime...")
         self.kospi_data = fdr.DataReader('KS11', start=self.start_date, end=self.end_date)
         self.kospi_data['Return_20d'] = self.kospi_data['Close'].pct_change(20)
+        self.kospi_data['MA20'] = self.kospi_data['Close'].rolling(20).mean()
+        self.kospi_data['MA120'] = self.kospi_data['Close'].rolling(120).mean()
+        self.kospi_data['Prev_MA20'] = self.kospi_data['MA20'].shift(1)
+        
+        # Determine Market Regime
+        conditions = [
+            (self.kospi_data['Close'] > self.kospi_data['MA120']) & (self.kospi_data['MA20'] > self.kospi_data['Prev_MA20']),
+            (self.kospi_data['Close'] < self.kospi_data['MA120'])
+        ]
+        choices = ["BULL", "BEAR"]
+        self.kospi_data['Regime'] = np.select(conditions, choices, default="NEUTRAL")
 
         for ticker, name in self.tickers.items():
             logger.info(f"Downloading {name} ({ticker})...")
@@ -97,10 +108,24 @@ class VectorBacktester:
                     continue
                 
                 pos['highest_price'] = max(pos['highest_price'], today_data['High'])
-                stop_price = pos['highest_price'] - (3 * pos['atr'])
+                # Market Regime based Trailing Stop
+                regime = "NEUTRAL"
+                if date in self.kospi_data.index:
+                    regime = self.kospi_data.loc[date]['Regime']
+                    
+                if regime == "BULL":
+                    mult, max_drop = 5.0, 25.0
+                elif regime == "BEAR":
+                    mult, max_drop = 1.5, 8.0
+                else:
+                    mult, max_drop = 2.5, 15.0
+                    
+                dynamic_trailing = max(3.0, min(max_drop, mult * pos['atr']))
+                stop_price = pos['highest_price'] - dynamic_trailing
                 
-                # Sell condition: Trailing Stop or Hard Stop (10% loss)
-                hard_stop_price = pos['buy_price'] * 0.90
+                # Hard stop
+                dynamic_hard = max(3.0, min(8.0, 1.5 * pos['atr']))
+                hard_stop_price = pos['buy_price'] - dynamic_hard
                 final_stop_price = max(stop_price, hard_stop_price)
                 
                 if today_data['Low'] <= final_stop_price:
@@ -144,11 +169,9 @@ class VectorBacktester:
                     is_aligned = row['MA20'] > row['MA60'] > row['MA120']
                     is_under_ma120 = row['Close'] < row['MA120']
                     
-                    # Relaxed VCP check (within 10% of lower band, vol < 70% of MA)
+                    # 스코어 기반 심사 (Gating 조건 제거)
+                    # 역배열이라도 과매도, VCP, 모멘텀 등이 좋으면 점수가 올라감
                     is_vcp = (row['Close'] < row['BB_lower'] * 1.10) and (row['Volume_Ratio'] < 0.7)
-                    
-                    if is_under_ma120:
-                        continue 
                         
                     score = 50.0
                     if is_aligned: score += 15.0
@@ -177,11 +200,26 @@ class VectorBacktester:
                 if slots_available > 0 and len(candidates) > 0:
                     target_alloc = self.capital / slots_available
                     
+                    regime = "NEUTRAL"
+                    if date in self.kospi_data.index:
+                        regime = self.kospi_data.loc[date]['Regime']
+                    
+                    # Size factor application based on regime
+                    size_factor = 1.0
+                    if regime == "BULL":
+                        size_factor = 1.5
+                    elif regime == "BEAR":
+                        size_factor = 0.5
+                        
                     for cand in candidates[:slots_available]:
                         price = cand['close']
                         if price <= 0: continue
                         
-                        quantity = int(target_alloc / price)
+                        alloc = target_alloc * size_factor
+                        # Ensure we don't exceed remaining capital
+                        alloc = min(alloc, self.capital)
+                        
+                        quantity = int(alloc / price)
                         if quantity > 0:
                             cost = quantity * price
                             self.capital -= cost
