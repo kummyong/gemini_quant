@@ -185,7 +185,13 @@ class TestStrategyEngineRealData(unittest.TestCase):
         self.assertAlmostEqual(scored[2]["total_score"], 12.5)
 
     def test_trailing_stop_logic(self):
-        # 1. 고점이 +3.0% 였고, 현재 수익률이 0.0%인 경우 (3.0%p 이상 하락) -> Trailing Stop 매도 작동 검증
+        # Chandelier 트레일링 기준: threshold = clamp(CHANDELIER_ATR_MULT * atr_pct,
+        # TRAILING_MIN_DROP, TRAILING_MAX_DROP). 기본 하이퍼파라미터(2.5/2.0/8.0)에 대해
+        # market_data로 atr_pct를 명시해 기대 임계값을 결정론적으로 만든다.
+        # atr_pct=1.6 -> threshold = max(2.0, min(8.0, 4.0)) = 4.0%p
+        market_data = [{"ticker": "005930", "atr_pct": 1.6}]
+
+        # 1. 고점 +5.0% -> 현재 0.0% (5.0%p 하락 >= 4.0%p) -> Trailing Stop 매도 작동
         current_holdings = [
             {
                 "ticker": "005930",
@@ -198,13 +204,28 @@ class TestStrategyEngineRealData(unittest.TestCase):
             }
         ]
         top_tickers = []
-        sell_signals = self.engine.generate_management_signals(current_holdings, top_tickers)
+        sell_signals = self.engine.generate_management_signals(current_holdings, top_tickers, market_data=market_data)
         self.assertEqual(len(sell_signals), 1)
         self.assertEqual(sell_signals[0]["ticker"], "005930")
         self.assertEqual(sell_signals[0]["action"], "SELL")
         self.assertTrue("Trailing Stop" in sell_signals[0]["reason"])
 
-        # 2. 고점이 +1.5% 였고, 현재 수익률이 -1.5%인 경우 (3.0%p 하락했으나 고점이 +2.0% 미만) -> Trailing Stop 작동하지 않음
+        # 2. 고점 +5.0% -> 현재 +2.0% (3.0%p 하락 < 4.0%p) -> 작동하지 않음
+        current_holdings = [
+            {
+                "ticker": "005930",
+                "name": "삼성전자",
+                "profit_rate": 2.0,
+                "quantity": 100,
+                "purchase_price": 70000.0,
+                "current_price": 71400.0,
+                "max_profit_rate": 5.0
+            }
+        ]
+        sell_signals = self.engine.generate_management_signals(current_holdings, ["005930"], market_data=market_data)
+        self.assertEqual(len(sell_signals), 0)
+
+        # 3. 고점이 +2.0% 미만이면 하락폭과 무관하게 트레일링 미발동 (수익 확보 전 구간)
         current_holdings = [
             {
                 "ticker": "005930",
@@ -216,7 +237,7 @@ class TestStrategyEngineRealData(unittest.TestCase):
                 "max_profit_rate": 1.5
             }
         ]
-        sell_signals = self.engine.generate_management_signals(current_holdings, ["005930"])
+        sell_signals = self.engine.generate_management_signals(current_holdings, ["005930"], market_data=market_data)
         self.assertEqual(len(sell_signals), 0)
 
     def test_hard_stop_loss_logic(self):
