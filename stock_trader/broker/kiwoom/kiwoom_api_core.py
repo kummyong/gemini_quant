@@ -138,6 +138,16 @@ class KiwoomApiCore:
         body = {"mrkt_tp": mrkt_tp, "amt_qty_tp": "0", "base_dt": base_dt, "stex_tp": "3"}
         return self._request("/api/dostk/sect", "ka10051", body=body)
 
+    def get_stock_investor_netbuy(self, stk_cd, dt=""):
+        """종목별 투자자·기관별 일별 매매 (ka10059). 응답 stk_invsr_orgn[]:
+        dt(일자, 내림차순), frgnr_invsr(외국인), orgn(기관계), ind_invsr(개인) 등.
+        amt_qty_tp='1'(금액), trde_tp='0'(순매수), unit_tp='1000'(천원)."""
+        if not dt:
+            import datetime as _dt
+            dt = _dt.date.today().strftime("%Y%m%d")
+        body = {"dt": dt, "stk_cd": stk_cd, "amt_qty_tp": "1", "trde_tp": "0", "unit_tp": "1000"}
+        return self._request("/api/dostk/stkinfo", "ka10059", body=body)
+
     def get_sector_index(self, inds_cd):
         """전업종지수 (ka20003). inds_cd: '001'=코스피, '101'=코스닥"""
         return self._request("/api/dostk/sect", "ka20003", body={"inds_cd": inds_cd})

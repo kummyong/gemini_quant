@@ -93,6 +93,9 @@ class StrategyEngine:
             logger.info(f"💼 [STOCK_MULTIFACTOR] 프로파일 로드됨. 유니버스 크기: {len(self.SAMPLE_DATA)}")
 
         self.naver = NaverFinanceProvider()
+        # 종목별 수급: 키움 ka10059 우선, 토큰이 없으면 네이버 크롤링 폴백 (실행 단위 소스 고정)
+        from stock_trader.data.investor_flow_provider import InvestorFlowProvider
+        self.investor_flow = InvestorFlowProvider(self.naver)
         self.scorer = MultiFactorScorer()
         self._init_dart()
         self._load_hyperparams()
@@ -429,7 +432,7 @@ class StrategyEngine:
                     logger.info(f"ℹ️ [{name}] 실시간 시세 파싱 실패로 로컬 DB 최신 종가로 대체: {current_price:,.0f}원")
 
                 # 네이버 금융 크롤링 (기관/외국인 수급)
-                net_buying, current_price, consecutive_buy_days = self.naver.fetch_investor_net_buying(ticker, name, current_price)
+                net_buying, current_price, consecutive_buy_days = self.investor_flow.fetch(ticker, name, current_price)
 
                 if self.dart_scorer:
                     try:
