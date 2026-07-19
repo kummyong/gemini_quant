@@ -625,6 +625,7 @@ class StrategyEngine:
                 "eps_growth": float(to_python_type(s.get("eps_growth", 0.0), 0.0)),
                 "net_buying": float(to_python_type(s.get("net_buying", 0.0), 0.0)),
                 "consecutive_buy_days": int(to_python_type(s.get("consecutive_buy_days", 0), 0)),
+                "has_insider_buying": bool(to_python_type(s.get("has_insider_buying", False), False)),
                 "dart_revenue_growth": float(to_python_type(s.get("dart_revenue_growth", 0.0), 0.0)),
                 "dart_op_growth": float(to_python_type(s.get("dart_op_growth", 0.0), 0.0)),
                 "dart_debt_ratio": float(to_python_type(s.get("dart_debt_ratio", 100.0), 100.0)),
@@ -1063,8 +1064,9 @@ class StrategyEngine:
         scored_stocks = self.calculate_scores(market_data)
 
         # P2/P3: 비정형 센티먼트 및 미시구조 지표 수집 (상위 50개 종목 대상)
+        # 수급 계열(ENABLE_SMART_MONEY_BONUS)과 분리 — 시점 불일치 재설계 전까지 기본 off
         import stock_trader.config as trader_config
-        if self.profile != ETF_TREND and getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
+        if self.profile != ETF_TREND and getattr(trader_config, 'ENABLE_SENTIMENT_MICRO_BONUS', False):
             logger.info("💬 상위 50개 종목 대상 센티먼트 및 미시구조 지표 수집 시작...")
             for s in scored_stocks[:50]:
                 traffic = self.naver.fetch_discussion_traffic(s["ticker"])

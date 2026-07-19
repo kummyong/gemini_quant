@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Dict, List
 
+import stock_trader.config as trader_config
+
 logger = logging.getLogger("MultiFactorScorer")
 
 # ── 기존 팩터 가중치 (네이버 금융 기반) ──
@@ -21,6 +23,10 @@ WEIGHT_DART_HEALTH = 0.05    # DART: 재무건전성 (부채비율/현금흐름)
 WEIGHT_INSTITUTIONAL = 0.25  # 수급(기관/외인) — 대량보유 보너스 포함
 
 # 합계: 0.15 + 0.20 + 0.15 + 0.20 + 0.05 + 0.25 = 1.00
+
+# 스마트 머니(수급) 가점 합산 상한 — 내부자 매수(+10)와 연속매집(+7)이 겹쳐도
+# 기존 기술 보너스 한 개(VCP +10, 상대모멘텀 +10)를 약간 넘는 수준까지만 허용한다.
+SMART_MONEY_BONUS_CAP = 12.0
 
 
 def apply_sector_momentum(stocks: List[Dict]) -> None:
@@ -146,27 +152,36 @@ class MultiFactorScorer:
                 final_score += 10.0
                 logger.info(f"✨ [{stock['name']}] BB 하단 거래량 급감 (VCP 패턴) 포착! 가점 10점 부여")
 
-            # 스마트 머니 매집 보너스 (수급 연속성 + OBV 추세 + 내부자 장내매수)
-            import stock_trader.config as trader_config
+            # 스마트 머니(수급) 매집 보너스: 내부자 장내매수 + 외인/기관 연속 순매수/OBV.
+            # 가점 크기는 기존 기술 보너스(VCP +10, 상대모멘텀 최대 +10)와 같은 급으로 제한하고,
+            # 합산 캡(SMART_MONEY_BONUS_CAP)으로 수급 계열이 가중합 팩터 모델을 지배하지 못하게 한다.
+            # 예측력 검증은 진입 스냅샷 → trade_outcomes → factor_analysis(IC) 경로로 계속 축적된다.
             if getattr(trader_config, 'ENABLE_SMART_MONEY_BONUS', False):
                 consec_days = stock.get("consecutive_buy_days", 0)
                 obv_rising = stock.get("is_obv_rising", False)
                 has_insider_buying = stock.get("has_insider_buying", False)
-                
-                # 1. 내부자(임원/주요주주) 장내매수 발생 (가장 강력한 시그널)
-                if has_insider_buying:
-                    final_score += 20.0
-                    logger.info(f"💎 [{stock['name']}] 내부자 장내매수 포착 (스마트 머니)! 가점 20점 부여")
 
-                # 2. 외인/기관 3일 이상 연속 순매수 & OBV 단기 상향 추세일 때 강력한 가점
+                smart_money_bonus = 0.0
+                # 1. 내부자(임원/주요주주) 장내매수 발생 (확신 매수 — 가장 강한 시그널)
+                if has_insider_buying:
+                    smart_money_bonus += 10.0
+                    logger.info(f"💎 [{stock['name']}] 내부자 장내매수 포착 (스마트 머니)! 가점 10점 부여")
+
+                # 2. 외인/기관 3일 이상 연속 순매수 & OBV 단기 상향 추세
                 if consec_days >= 3 and obv_rising:
-                    final_score += 15.0
-                    logger.info(f"🔥 [{stock['name']}] 스마트 머니 연속 매집 포착 (3일 이상 연속 순매수 + OBV 우상향)! 가점 15점 부여")
+                    smart_money_bonus += 7.0
+                    logger.info(f"🔥 [{stock['name']}] 스마트 머니 연속 매집 포착 ({consec_days}일 연속 순매수 + OBV 우상향)! 가점 7점 부여")
                 # 3. OBV는 약하더라도 연속 순매수 자체가 4일 이상이면 가점
                 elif consec_days >= 4:
-                    final_score += 8.0
-                    logger.info(f"💧 [{stock['name']}] 외인/기관 연속 매집 ({consec_days}일)! 가점 8점 부여")
+                    smart_money_bonus += 4.0
+                    logger.info(f"💧 [{stock['name']}] 외인/기관 연속 매집 ({consec_days}일)! 가점 4점 부여")
 
+                final_score += min(SMART_MONEY_BONUS_CAP, smart_money_bonus)
+
+            # 센티먼트/미시구조 보너스 — 별도 플래그. 현재 신호 정의에 시점 불일치 문제가 있어
+            # (08:30 개장 전 실행인데 호가잔량/체결강도/당일 게시글 수는 장중 실시간 지표)
+            # 재설계 전까지 기본 비활성화를 유지한다.
+            if getattr(trader_config, 'ENABLE_SENTIMENT_MICRO_BONUS', False):
                 # 4. 종목토론방 센티먼트 (조용한 매집 vs 개인 쏠림)
                 if "discussion_traffic" in stock:
                     traffic = stock["discussion_traffic"]

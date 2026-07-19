@@ -40,12 +40,14 @@ ACTIVE_STRATEGY_PROFILE = os.environ.get("STRATEGY_PROFILE", STOCK_MULTIFACTOR)
 # 초기에는 False로 두고 며칠간 로그(매칭률/z분포)만 관찰한 뒤 켜는 것을 권장한다.
 ENABLE_SECTOR_FLOW_BLEND = os.environ.get("ENABLE_SECTOR_FLOW_BLEND", "false").lower() == "true"
 
-# 스마트 머니 매집 보너스 (내부자 장내매수 + 수급 연속성/OBV + 센티먼트/미시구조) 적용 여부.
-# 가점 합이 종목당 최대 ±수십 점으로 기존 가중합 팩터 모델을 지배할 수 있는 크기라,
-# trade_outcomes/IC 분석으로 예측력이 확인되기 전까지는 기본 비활성화한다.
-# (비활성화 상태에서도 has_insider_buying/consecutive_buy_days는 진입 스냅샷에 계속 기록되어
-#  factor_analysis가 검증 증거를 축적한다)
-ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "false").lower() == "true"
+# 스마트 머니(수급) 매집 보너스 — 내부자 장내매수 + 외인/기관 수급 연속성/OBV.
+# 가점은 scorer.SMART_MONEY_BONUS_CAP으로 캡되어 기존 기술 보너스와 같은 급으로 제한되며,
+# 예측력은 진입 스냅샷 → trade_outcomes → 주간 IC 리포트로 계속 검증한다.
+ENABLE_SMART_MONEY_BONUS = os.environ.get("ENABLE_SMART_MONEY_BONUS", "true").lower() == "true"
+
+# 센티먼트/미시구조 보너스 (토론방 트래픽, 체결강도, 호가잔량) — 수급 계열과 분리된 플래그.
+# 현재 신호 정의에 시점 불일치가 있어(08:30 개장 전 실행 vs 장중 실시간 지표) 재설계 전까지 비활성화.
+ENABLE_SENTIMENT_MICRO_BONUS = os.environ.get("ENABLE_SENTIMENT_MICRO_BONUS", "false").lower() == "true"
 
 # ETF 유니버스 리스트 (ticker, name)
 ETF_UNIVERSE = [

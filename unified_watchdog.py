@@ -87,6 +87,7 @@ def run_watchdog():
     last_smart_money_run = None  # 스마트 머니 수집 마지막 실행일
     last_db_backup_run = None    # DB 백업 마지막 실행일
     last_holiday_warn_month = None  # 휴장일 테이블 점검 경보 마지막 발송 월
+    last_ic_report_run = None    # 주간 IC 리포트 마지막 실행일
 
     # 현재 환경 변수 복사 및 PYTHONPATH 설정
     env = os.environ.copy()
@@ -202,6 +203,23 @@ def run_watchdog():
                         send_telegram_message(f"🚨 [System] DB 일일 백업 실패: {e}")
                     except Exception:
                         pass
+
+        # [스케줄링] 주간 팩터 IC 리포트 (토요일 09:00 이후 30분 윈도우 내 한 번만)
+        # 신규 신호(내부자/연속수급 등)의 예측력 증거를 매주 텔레그램으로 받아
+        # 가점 플래그/크기를 데이터로 조정하기 위한 검증 루프의 마지막 조각.
+        if now.weekday() == 5:  # 토요일
+            ic_target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if ic_target <= now < ic_target + timedelta(minutes=30):
+                today_str = now.strftime("%Y-%m-%d")
+                if last_ic_report_run != today_str:
+                    log("📅 [Schedule] 주간 팩터 IC 리포트 실행")
+                    ic_report_path = os.path.join(BASE_DIR, "stock_trader/scripts/weekly_ic_report.py")
+                    try:
+                        subprocess.run([VENV_PYTHON, ic_report_path], env=env, check=True, timeout=300)
+                        last_ic_report_run = today_str
+                        log("✨ [Schedule] 주간 IC 리포트 전송 완료")
+                    except Exception as e:
+                        log(f"❌ [Schedule] 주간 IC 리포트 실패: {e}")
 
         # [스케줄링] KRX 휴장일 테이블 소진 점검 (매월 1일 09시, 월 1회 경보)
         if now.day == 1 and now.hour == 9:
