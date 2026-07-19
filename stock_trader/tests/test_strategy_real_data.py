@@ -114,7 +114,8 @@ class TestStrategyEngineRealData(unittest.TestCase):
         mock_get.side_effect = [mock_main_res, mock_frgn_res]
 
         # Patch SAMPLE_DATA to query only 1 stock for the mock test
-        with patch.object(StrategyEngine, 'SAMPLE_DATA', [("005930", "삼성전자")]):
+        with patch.object(StrategyEngine, 'SAMPLE_DATA', [("005930", "삼성전자")]), \
+             patch('stock_trader.data.investor_flow_provider.InvestorFlowProvider._resolve_source', return_value='NAVER'):
             data = self.engine.fetch_market_data()
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["ticker"], "005930")
