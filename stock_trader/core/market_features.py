@@ -93,6 +93,12 @@ def compute_technical_features(df_hist: pd.DataFrame, current_price: float, bb_s
             # 9. OBV 상승 추세 판단
             feats["is_obv_rising"] = ind.is_obv_rising(df_hist)
 
+            # 10. 기업행위(분할/합병 등) 감지 필터 (전일 대비 45% 이상 급등락)
+            if len(closes) >= 2:
+                prev_close = closes.iloc[-2]
+                if prev_close > 0 and abs(current_price - prev_close) / prev_close > 0.45:
+                    feats["is_corp_action_anomaly"] = True
+            
     except Exception as tech_e:
         logger.warning(f"[{name}] 기술 지표 계산 실패: {tech_e}")
 

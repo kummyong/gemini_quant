@@ -178,6 +178,13 @@ class VectorBacktester:
                     if pd.isna(row['MA120']) or pd.isna(row['RSI']):
                         continue
                         
+                    # Corporate action anomaly check (±45% jump indicates split/merger anomaly)
+                    prev_date_idx = df.index.get_loc(date) - 1
+                    if prev_date_idx >= 0:
+                        prev_close = df['Close'].iloc[prev_date_idx]
+                        if prev_close > 0 and abs(row['Close'] - prev_close) / prev_close > 0.45:
+                            continue
+                        
                     # Filtering criteria mimicking MultiFactorScorer core
                     is_aligned = row['MA20'] > row['MA60'] > row['MA120']
                     is_under_ma120 = row['Close'] < row['MA120']
@@ -197,8 +204,14 @@ class VectorBacktester:
                             rel_mom = (row['Return_20d'] - kospi_ret) * 100
                             if rel_mom > 0:
                                 score += min(10.0, rel_mom * 0.1)
+                                
+                    regime_for_entry = "NEUTRAL"
+                    if date in self.kospi_data.index:
+                        regime_for_entry = self.kospi_data.loc[date]['Regime']
+                        
+                    entry_threshold = 70.0 if regime_for_entry == "BEAR" else 60.0
                             
-                    if score >= 60.0:
+                    if score >= entry_threshold:
                         atr_pct = (row['ATR'] / row['Close'] * 100.0) if (not pd.isna(row['ATR']) and row['Close'] > 0) else 3.0
                         candidates.append({
                             'ticker': ticker,
@@ -221,7 +234,7 @@ class VectorBacktester:
                     # Size factor application based on regime
                     size_factor = 1.0
                     if regime == "BULL":
-                        size_factor = 1.5
+                        size_factor = 1.0 # 1.5배 오버웨이트 제거 (과접합 방지)
                     elif regime == "BEAR":
                         size_factor = 0.2
                         

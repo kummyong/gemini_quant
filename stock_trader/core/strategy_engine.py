@@ -1347,9 +1347,15 @@ class StrategyEngine:
                 
                 regime_now = getattr(self, 'market_regime', 'NEUTRAL')
                 
-                # 점수가 기준점(60점) 이상이면 매수 승인 (과최적화 제약조건 철폐)
-                if score < 60.0:
-                    logger.info(f"⏭️ [{b_name}] {name}: 점수 미달 (Score: {score:.1f} < 60.0)")
+                # 기업행위 이상치(당일 45% 초과 가격 변동) 감지 시 매수 보류
+                if s.get("is_corp_action_anomaly", False):
+                    logger.warning(f"⚠️ [{b_name}] {name}: 기업행위 이상(±45% 급등락) 감지. 매수 보류")
+                    continue
+
+                # 점수가 국면별 기준점 이상이면 매수 승인 (BEAR=70, 그 외=60)
+                entry_threshold = 70.0 if regime_now == "BEAR" else 60.0
+                if score < entry_threshold:
+                    logger.info(f"⏭️ [{b_name}] {name}: 점수 미달 (Score: {score:.1f} < {entry_threshold:.1f})")
                     continue
                     
                 weight_multiplier = 1.0
@@ -1364,8 +1370,8 @@ class StrategyEngine:
                     weight_multiplier *= bear_factor
                     logger.info(f"🛡️ [{b_name}] {name}: BEAR 국면 매수 비중 {bear_factor:.0%}로 축소 적용")
                 elif regime_now == "BULL":
-                    weight_multiplier *= 1.5
-                    logger.info(f"🐂 [{b_name}] {name}: BULL 국면 매수 비중 확대 적용 (1.5x)")
+                    weight_multiplier *= 1.0
+                    logger.info(f"🐂 [{b_name}] {name}: BULL 국면 매수 진입 (과접합 방지 위해 비중 확대 1.0x로 유지)")
                     
                 logger.info(f"📈 [{b_name}] {name}: 종합 점수 진입 조건 부합 (Score: {score:.1f}, 국면: {regime_now})")
 
