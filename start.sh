@@ -12,6 +12,6 @@ if pgrep -f "unified_watchdog.py" > /dev/null; then
 fi
 
 echo "🚀 Gemini Quant 서비스를 시작합니다..."
-setsid python3 -u unified_watchdog.py > $LOG_DIR/unified_watchdog.out 2>&1
+setsid python3 -u unified_watchdog.py > $LOG_DIR/unified_watchdog.out 2>&1 &
 
 echo "✅ 시작 완료. 로그 확인: tail -f $LOG_DIR/unified_watchdog.log"

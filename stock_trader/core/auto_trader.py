@@ -464,7 +464,7 @@ def estimate_fill_price(api, ticker: str, fallback_price: float) -> float:
             if str(h.get("stk_cd", "")).replace("A", "") == ticker:
                 q = int(h.get("rmnd_qty", 0))
                 if q > 0:
-                    return float(h.get("pchs_amt", 0.0)) / q
+                    return float(h.get("pur_amt", h.get("pchs_amt", 0.0))) / q
     except Exception as e:
         logger.warning(f"⚠️ 체결가 확인 실패 ({ticker}) — 주문 직전 현재가로 기록: {e}")
     return fallback_price
