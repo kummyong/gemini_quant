@@ -600,7 +600,13 @@ def run_trade():
                             # 다음날 아침 시가에 스테일 가격으로 집행되는 것을 방지
                             try:
                                 created_at = datetime.strptime(str(sig['created_at'])[:19], "%Y-%m-%d %H:%M:%S")
-                                age_hours = (now.replace(tzinfo=None) - created_at).total_seconds() / 3600.0
+                                now_kst_naive = now.replace(tzinfo=None)
+                                age_hours = (now_kst_naive - created_at).total_seconds() / 3600.0
+                                # DB에 UTC 기준 생성시각이 저장되어 KST(now)와 9시간 시차가 발생하는 경우 정정
+                                if age_hours >= 8.5:
+                                    age_hours = max(0.0, age_hours - 9.0)
+                                elif age_hours < 0:
+                                    age_hours = max(0.0, age_hours + 9.0)
                                 if age_hours > SIGNAL_MAX_AGE_HOURS:
                                     logger.warning(f"⏭️ [신호 만료] {sig['name']}: 생성 후 {age_hours:.1f}시간 경과 (한도 {SIGNAL_MAX_AGE_HOURS}h) — 매수 취소")
                                     get_repo().cancel_signal(sig['id'], f"신선도 만료 ({age_hours:.1f}h)")

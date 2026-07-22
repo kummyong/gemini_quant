@@ -4,6 +4,8 @@ import json
 import logging
 from contextlib import contextmanager
 
+from datetime import datetime, timezone, timedelta
+
 # 전역 로거 설정
 logger = logging.getLogger("DbRepository")
 
@@ -397,12 +399,13 @@ class DbRepository:
 
     def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM', features: str = None) -> int:
         """신규 트레이딩 시그널을 이력과 함께 삽입 (과거 데이터 보존 가능)"""
+        created_at_kst = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status, broker_id, features)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (ticker, name, action, quantity, reason, status, broker_id, features))
+                INSERT INTO trade_signals (ticker, name, action, quantity, reason, status, broker_id, features, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ticker, name, action, quantity, reason, status, broker_id, features, created_at_kst))
             return cursor.lastrowid
 
     def expire_pending_signals(self):
