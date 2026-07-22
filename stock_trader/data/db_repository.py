@@ -16,6 +16,43 @@ logger = logging.getLogger("DbRepository")
 HARD_STOP_LOCKOUT_PREFIX = "[HARD_STOP]"
 
 
+import random
+import time
+from functools import wraps
+
+
+def _is_lock_error(e: Exception) -> bool:
+    """sqlite3.OperationalError 중 'database is locked' 또는 'database is busy' 에러인지 검증합니다."""
+    if isinstance(e, sqlite3.OperationalError):
+        msg = str(e).lower()
+        return "database is locked" in msg or "database is busy" in msg
+    return False
+
+
+def with_db_retry(max_retries: int = 3, base_delay: float = 0.1, backoff_factor: float = 2.0):
+    """SQLite 락/바지 발생 시 지수 백오프 + 지터(Jitter)로 재시도하는 데코레이터.
+    lock error가 아니거나 최대 재시도 횟수 초과 시 원래 예외를 재발생(raise)시킵니다.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if _is_lock_error(e) and attempt < max_retries:
+                        jitter = random.uniform(0, 0.05)
+                        delay = (base_delay * (backoff_factor ** attempt)) + jitter
+                        logger.warning(
+                            f"⚠️ DB 락/바지 감지 ({e}). {delay:.2f}초 후 재시도... ({attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(delay)
+                    else:
+                        raise e
+        return wrapper
+    return decorator
+
+
 def is_hard_stop_lockout(state: dict) -> bool:
     """market_lockout 상태가 '글로벌 하드스탑' 락아웃인지 판별합니다."""
     if not state or not state.get("active"):
@@ -49,6 +86,7 @@ class DbRepository:
         finally:
             conn.close()
 
+    @with_db_retry()
     def init_db(self):
         """데이터베이스 스키마 초기화 및 마이그레이션 통합 관리"""
         with self.get_connection() as conn:
@@ -397,6 +435,7 @@ class DbRepository:
 
     # --- 데이터 엑세스 API 구현 ---
 
+    @with_db_retry()
     def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM', features: str = None) -> int:
         """신규 트레이딩 시그널을 이력과 함께 삽입 (과거 데이터 보존 가능)"""
         created_at_kst = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
@@ -408,12 +447,14 @@ class DbRepository:
             """, (ticker, name, action, quantity, reason, status, broker_id, features, created_at_kst))
             return cursor.lastrowid
 
+    @with_db_retry()
     def expire_pending_signals(self):
         """대기 중인 이전 PENDING 시그널들을 만료 처리"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE trade_signals SET status = 'EXPIRED' WHERE status = 'PENDING'")
 
+    @with_db_retry()
     def get_portfolio_holdings(self):
         """보유 수량이 있는 종목의 목록 조회"""
         with self.get_connection() as conn:
@@ -422,6 +463,7 @@ class DbRepository:
             cursor.execute("SELECT broker_id, stk_cd, stk_nm, prft_rt, rmnd_qty, pur_pric, cur_prc, max_profit_rate, is_runner, out_of_top_streak FROM portfolio_status WHERE rmnd_qty > 0")
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def update_portfolio_holding(self, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float, max_profit_rate: float, broker_id: str = 'KIWOOM'):
         """보유 현황 업데이트 (Upsert 패턴)"""
         with self.get_connection() as conn:
@@ -438,6 +480,7 @@ class DbRepository:
                     last_updated = excluded.last_updated
             """, (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt, max_profit_rate))
 
+    @with_db_retry()
     def reconcile_portfolio_holding(self, broker_id: str, stk_cd: str, stk_nm: str, rmnd_qty: int, pur_pric: float, cur_prc: float, prft_rt: float):
         """브로커 실계좌 값으로 포지션을 갱신합니다 (계좌가 진실, DB는 사본).
         신규 등록 시 peak_close(=max_profit_rate 0.0, 즉 평균단가 자체)로 초기화하고,
@@ -456,12 +499,14 @@ class DbRepository:
                     last_updated = excluded.last_updated
             """, (broker_id, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, prft_rt))
 
+    @with_db_retry()
     def delete_portfolio_holding(self, broker_id: str, stk_cd: str):
         """지정된 브로커/종목의 포지션 기록을 삭제합니다 (유령 포지션 정리 등)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM portfolio_status WHERE broker_id = ? AND stk_cd = ?", (broker_id, stk_cd))
 
+    @with_db_retry()
     def clear_all_portfolio_holdings(self, broker_id: str):
         """지정된 브로커의 모든 포지션 기록을 일괄 삭제합니다 (계좌 리셋 감지 시 사용).
         stopped_positions, market_lockout은 별도 테이블이므로 영향받지 않습니다."""
@@ -469,6 +514,7 @@ class DbRepository:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM portfolio_status WHERE broker_id = ?", (broker_id,))
 
+    @with_db_retry()
     def get_strategy_hyperparams(self) -> dict:
         """전략 하이퍼파라미터 전량 조회"""
         with self.get_connection() as conn:
@@ -476,6 +522,7 @@ class DbRepository:
             cursor.execute("SELECT param_key, param_value FROM strategy_hyperparams")
             return {row[0]: float(row[1]) for row in cursor.fetchall()}
 
+    @with_db_retry()
     def upsert_hyperparam(self, param_key: str, param_value: float):
         """하이퍼파라미터 단건 저장/갱신"""
         with self.get_connection() as conn:
@@ -488,6 +535,7 @@ class DbRepository:
                     updated_at = excluded.updated_at
             """, (param_key, param_value))
 
+    @with_db_retry()
     def get_max_profit_rates(self, broker_id: str) -> dict:
         """지정 브로커 보유 종목의 stk_cd -> max_profit_rate 매핑 조회"""
         with self.get_connection() as conn:
@@ -495,6 +543,7 @@ class DbRepository:
             cursor.execute("SELECT stk_cd, max_profit_rate FROM portfolio_status WHERE broker_id = ?", (broker_id,))
             return {row[0]: float(row[1]) if row[1] is not None else 0.0 for row in cursor.fetchall()}
 
+    @with_db_retry()
     def mark_holding_sold(self, broker_id: str, stk_cd: str):
         """전량 청산된 포지션의 보유 수량을 0으로 갱신합니다 (러너 플래그·진입 스냅샷도 함께 초기화).
         entry_* 초기화는 반드시 record_trade_outcome으로 결과를 기록한 *이후*에 호출할 것
@@ -509,6 +558,7 @@ class DbRepository:
                 WHERE broker_id = ? AND stk_cd = ?
             """, (broker_id, stk_cd))
 
+    @with_db_retry()
     def record_position_entry(self, broker_id: str, stk_cd: str, stk_nm: str, entry_price: float,
                                entry_signal_type: str, entry_features: str = None):
         """신규 포지션 진입 시점의 가격·전략유형·팩터 스냅샷을 기록합니다.
@@ -527,6 +577,7 @@ class DbRepository:
                     entry_features = CASE WHEN portfolio_status.entry_date IS NULL THEN excluded.entry_features ELSE portfolio_status.entry_features END
             """, (broker_id, stk_cd, stk_nm, entry_price, entry_signal_type, entry_features))
 
+    @with_db_retry()
     def get_position_entry(self, broker_id: str, stk_cd: str) -> dict:
         """포지션의 진입 스냅샷 조회 (없으면 entry_date가 None인 dict 반환)."""
         with self.get_connection() as conn:
@@ -540,6 +591,7 @@ class DbRepository:
             return dict(row) if row else {"stk_nm": None, "entry_date": None, "entry_price": None,
                                            "entry_signal_type": None, "entry_features": None}
 
+    @with_db_retry()
     def record_trade_outcome(self, broker_id: str, ticker: str, name: str, entry_date: str, entry_price: float,
                               entry_signal_type: str, entry_features: str, exit_price: float, exit_reason: str,
                               quantity: int, return_pct: float, holding_days: int, position_closed: bool = True):
@@ -555,6 +607,7 @@ class DbRepository:
             """, (broker_id, ticker, name, entry_date, entry_price, entry_signal_type, entry_features,
                   exit_price, exit_reason, quantity, return_pct, holding_days, 1 if position_closed else 0))
 
+    @with_db_retry()
     def get_trade_outcomes(self, limit: int = 10000) -> list:
         """팩터 분석용 실현 청산 결과 전량(최신순) 조회"""
         with self.get_connection() as conn:
@@ -563,6 +616,7 @@ class DbRepository:
             cursor.execute("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def set_position_runner(self, broker_id: str, stk_cd: str, runner: bool = True):
         """오버슈팅 부분 익절 후 잔여 물량(러너) 여부를 기록합니다.
         러너는 이후 오버슈팅 청산에서 제외되고 트레일링/하드스탑으로만 관리된다."""
@@ -572,12 +626,14 @@ class DbRepository:
                 "UPDATE portfolio_status SET is_runner = ?, last_updated = datetime('now', 'localtime') WHERE broker_id = ? AND stk_cd = ?",
                 (1 if runner else 0, broker_id, stk_cd))
 
+    @with_db_retry()
     def update_out_of_top_streak(self, broker_id: str, stk_cd: str, streak: int):
         """종목의 순위 연속 이탈 거래일 수를 갱신합니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE portfolio_status SET out_of_top_streak = ? WHERE broker_id = ? AND stk_cd = ?", (streak, broker_id, stk_cd))
 
+    @with_db_retry()
     def save_trade_history(self, ticker: str, name: str, side: str, quantity: int, price: int, amt: int, reason: str, features: str = None):
         """체결 이력 저장"""
         with self.get_connection() as conn:
@@ -586,6 +642,7 @@ class DbRepository:
                 "INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (ticker, name, side, quantity, price, amt, reason, features))
 
+    @with_db_retry()
     def get_last_buy_timestamp(self, ticker: str):
         """지정 종목의 가장 최근 BUY 체결 시각을 반환합니다 (기록 없으면 None).
         strategy_engine의 교체 매도 규율(최소 보유일)에서 보유 경과일 계산에 사용."""
@@ -597,6 +654,7 @@ class DbRepository:
             row = cursor.fetchone()
             return row[0] if row else None
 
+    @with_db_retry()
     def get_last_buy_regime(self, ticker: str):
         """지정 종목의 가장 최근 BUY 체결 시점 market_regime을 반환합니다 (기록 없으면 None).
         features JSON에 market_regime이 없거나 파싱 실패 시에도 None으로 폴백한다.
@@ -614,6 +672,7 @@ class DbRepository:
             except (ValueError, TypeError, AttributeError):
                 return None
 
+    @with_db_retry()
     def get_pending_signals(self) -> list:
         """PENDING 상태의 매매 신호 전량 조회"""
         with self.get_connection() as conn:
@@ -622,12 +681,14 @@ class DbRepository:
             cursor.execute("SELECT id, ticker, name, action, quantity, reason, broker_id, features, created_at FROM trade_signals WHERE status = 'PENDING'")
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def complete_signal(self, signal_id: int):
         """매매 신호를 DONE 상태로 갱신"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE trade_signals SET status = 'DONE' WHERE id = ?", (signal_id,))
 
+    @with_db_retry()
     def cancel_signal(self, signal_id: int, note: str = None):
         """매매 신호를 CANCELLED 상태로 갱신 (note는 reason 뒤에 덧붙임)"""
         with self.get_connection() as conn:
@@ -637,6 +698,7 @@ class DbRepository:
             else:
                 cursor.execute("UPDATE trade_signals SET status = 'CANCELLED' WHERE id = ?", (signal_id,))
 
+    @with_db_retry()
     def save_account_snapshot(self, total_assets: int, cash: int, cash_ratio: float):
         """계좌 요약 스냅샷 저장 (일일 마감 보고 시점 등에 기록)"""
         with self.get_connection() as conn:
@@ -645,6 +707,7 @@ class DbRepository:
                 "INSERT INTO account_summary (total_assets, cash, cash_ratio) VALUES (?, ?, ?)",
                 (total_assets, cash, cash_ratio))
 
+    @with_db_retry()
     def get_latest_account_summary(self):
         """가장 최근 계좌 스냅샷 조회 (브로커 API 실패 시 폴백용). 없으면 None."""
         with self.get_connection() as conn:
@@ -654,6 +717,7 @@ class DbRepository:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    @with_db_retry()
     def get_trades_on_date(self, date_str: str) -> list:
         """지정 날짜(YYYY-MM-DD)의 체결 이력 조회"""
         with self.get_connection() as conn:
@@ -664,6 +728,7 @@ class DbRepository:
                 (f"{date_str}%",))
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def get_recent_training_data(self, limit: int = 100) -> list:
         """최근 학습 피드백 (raw_text, actual_label) 조회"""
         with self.get_connection() as conn:
@@ -671,6 +736,7 @@ class DbRepository:
             cursor.execute("SELECT raw_text, actual_label FROM training_data ORDER BY created_at DESC LIMIT ?", (limit,))
             return cursor.fetchall()
 
+    @with_db_retry()
     def save_system_metric(self, timestamp: str, cpu_load_1m: float, cpu_usage: float, battery_level: str, cpu_temp: str, mem_total: int, mem_used: int, mem_avail: int, mem_pct: float):
         """시스템 하드웨어 메트릭 정보 저장"""
         with self.get_connection() as conn:
@@ -681,6 +747,7 @@ class DbRepository:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (timestamp, cpu_load_1m, cpu_usage, battery_level, cpu_temp, mem_total, mem_used, mem_avail, mem_pct))
 
+    @with_db_retry()
     def sync_ohlcv_data(self, ticker: str, force_full: bool = False, backfill_days: int = 200):
         """웹에서 종목의 최신 OHLCV 데이터를 조회하여 DB에 차분(Delta) 병합합니다."""
         try:
@@ -734,6 +801,7 @@ class DbRepository:
         except Exception as e:
             logger.exception(f"[{ticker}] OHLCV 동기화 중 오류: {e}")
 
+    @with_db_retry()
     def get_recent_ohlcv(self, ticker: str, limit: int = 300):
         """DB에서 가장 최신 OHLCV 데이터를 Pandas DataFrame으로 반환합니다."""
         import pandas as pd
@@ -749,6 +817,7 @@ class DbRepository:
             df.set_index('Date', inplace=True)
             return df
 
+    @with_db_retry()
     def get_atr_value(self, ticker: str, calc_date: str):
         """당일자로 이미 계산된 ATR%가 있으면 반환 (없으면 None) — 프로세스 재시작 후에도
         같은 날짜의 계산을 반복하지 않기 위한 영속 캐시 조회."""
@@ -758,6 +827,7 @@ class DbRepository:
             row = cursor.fetchone()
             return float(row[0]) if row and row[0] is not None else None
 
+    @with_db_retry()
     def save_atr_value(self, ticker: str, calc_date: str, atr_pct: float):
         """종목의 당일자 ATR% 계산 결과를 저장합니다 (upsert)."""
         with self.get_connection() as conn:
@@ -767,6 +837,7 @@ class DbRepository:
                 ON CONFLICT(ticker, calc_date) DO UPDATE SET atr_pct = excluded.atr_pct
             """, (ticker, calc_date, atr_pct))
 
+    @with_db_retry()
     def save_stopped_position(self, ticker: str, stop_date: str, stop_price: float, profile: str):
         """스탑 청산된 포지션을 저장합니다 (쿨다운 추적용)."""
         with self.get_connection() as conn:
@@ -776,6 +847,7 @@ class DbRepository:
                 VALUES (?, ?, ?, ?)
             """, (ticker, stop_date, stop_price, profile))
 
+    @with_db_retry()
     def get_stopped_positions(self, profile: str) -> list:
         """지정된 프로파일의 모든 stopped_positions 조회"""
         with self.get_connection() as conn:
@@ -784,12 +856,14 @@ class DbRepository:
             cursor.execute("SELECT ticker, stop_date, stop_price, profile FROM stopped_positions WHERE profile = ?", (profile,))
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def clear_stopped_position(self, ticker: str, profile: str):
         """재진입이 확정된 티커의 stopped_positions 기록을 삭제합니다 (쿨다운 해제)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM stopped_positions WHERE ticker = ? AND profile = ?", (ticker, profile))
 
+    @with_db_retry()
     def update_market_lockout(self, active: bool, since: str = None, reason: str = None):
         """시장 락아웃 상태를 업데이트합니다."""
         with self.get_connection() as conn:
@@ -799,6 +873,7 @@ class DbRepository:
                 VALUES (1, ?, ?, ?)
             """, (1 if active else 0, since, reason))
 
+    @with_db_retry()
     def get_market_lockout(self) -> dict:
         """시장 락아웃 상태를 조회합니다."""
         with self.get_connection() as conn:
@@ -810,6 +885,7 @@ class DbRepository:
                 return dict(row)
             return {"active": 0, "since": None, "reason": None}
 
+    @with_db_retry()
     def save_sector_flow(self, date: str, inds_cd: str, inds_nm: str, mrkt_tp: str,
                           frgnr_netprps: float, orgn_netprps: float, ind_netprps: float):
         """업종별 투자자 순매수 일별 데이터를 저장합니다 (upsert)."""
@@ -824,6 +900,7 @@ class DbRepository:
                     ind_netprps = excluded.ind_netprps
             """, (date, inds_cd, inds_nm, mrkt_tp, frgnr_netprps, orgn_netprps, ind_netprps))
 
+    @with_db_retry()
     def save_sector_price(self, date: str, inds_cd: str, inds_nm: str, cur_prc: float,
                            flu_rt: float, rising: int, stdns: int, fall: int):
         """전업종지수 및 등락종목수 일별 데이터를 저장합니다 (upsert)."""
@@ -837,6 +914,7 @@ class DbRepository:
                     rising = excluded.rising, stdns = excluded.stdns, fall = excluded.fall
             """, (date, inds_cd, inds_nm, cur_prc, flu_rt, rising, stdns, fall))
 
+    @with_db_retry()
     def save_insider_buying(self, ticker: str, date: str, title: str, reporter: str, reason: str, amount: int):
         """내부자 장내매수 내역을 저장합니다."""
         with self.get_connection() as conn:
@@ -846,6 +924,7 @@ class DbRepository:
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (ticker, date, title, reporter, reason, amount))
 
+    @with_db_retry()
     def get_recent_insider_buying_tickers(self, days: int = 5) -> set:
         """최근 N일 내 내부자 장내매수가 있었던 종목의 티커 집합(set)을 반환합니다."""
         with self.get_connection() as conn:
@@ -856,6 +935,7 @@ class DbRepository:
             """, (f'-{days} days',))
             return {row[0] for row in cursor.fetchall()}
 
+    @with_db_retry()
     def get_sector_flow_history(self, inds_cd: str, days: int = 90) -> list:
         """특정 업종코드의 최근 N일 투자자 순매수 이력을 날짜 오름차순으로 반환합니다."""
         with self.get_connection() as conn:
@@ -869,6 +949,7 @@ class DbRepository:
             """, (inds_cd, days))
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def get_sector_price_history(self, inds_cd: str, days: int = 90) -> list:
         """특정 업종코드의 최근 N일 지수/등락종목수 이력을 날짜 오름차순으로 반환합니다."""
         with self.get_connection() as conn:
@@ -882,6 +963,7 @@ class DbRepository:
             """, (inds_cd, days))
             return [dict(row) for row in cursor.fetchall()]
 
+    @with_db_retry()
     def get_all_sector_codes(self) -> list:
         """sector_flows에 한 번이라도 적재된 모든 업종코드/업종명 쌍을 반환합니다 (가장 최근 업종명 기준)."""
         with self.get_connection() as conn:
