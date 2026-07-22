@@ -152,13 +152,14 @@ def get_ai_teacher_decision(text):
     clean_model_name = model_name.replace("models/", "")
     
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent"
+        headers = {"x-goog-api-key": GEMINI_API_KEY}
         payload = {
             "contents": [{"parts": [{"text": f"Msg: \"{text}\"\nIntent/Params extraction."}]}],
             "tools": [{"function_declarations": SYSTEM_TOOLS}],
             "tool_config": {"function_calling_config": {"mode": "ANY"}}
         }
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
         if res.status_code == 429: return "LIMIT_REACHED", {}, 0
         res_json = res.json()
         candidates = res_json.get('candidates', [])

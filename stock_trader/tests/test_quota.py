@@ -17,10 +17,11 @@ def check_quota():
         return
     print(f"Checking Quota for Key: {GEMINI_API_KEY[:10]}...")
     # gemini-2.0-flash 모델로 테스트
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    headers = {"x-goog-api-key": GEMINI_API_KEY}
     payload = {"contents": [{"parts": [{"text": "Quota test. Reply with 'OK'."}]}]}
     
-    res = requests.post(url, json=payload, timeout=20)
+    res = requests.post(url, headers=headers, json=payload, timeout=20)
     print(f"Status Code: {res.status_code}")
     if res.status_code != 200:
         print(f"Response: {res.text}")

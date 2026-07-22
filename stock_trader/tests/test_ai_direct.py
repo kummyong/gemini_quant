@@ -13,13 +13,14 @@ def test_ai():
         return
     print(f"Testing Gemini API with Key: {GEMINI_API_KEY[:10]}...")
     # v1 엔드포인트 + gemini-pro (가장 범용적인 조합)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key={GEMINI_API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent"
+    headers = {"x-goog-api-key": GEMINI_API_KEY}
     
     prompt = "안녕? 너는 누구니? 간단하게 대답해줘."
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        res = requests.post(url, json=payload, timeout=20)
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
         print(f"Status: {res.status_code}")
         print(f"Response: {res.text}")
     except Exception as e:
