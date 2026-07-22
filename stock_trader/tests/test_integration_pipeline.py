@@ -1,4 +1,7 @@
 import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from unittest.mock import patch
 
@@ -112,6 +115,63 @@ def test_sell_signal_pipeline_success(test_pipeline_env):
     assert len(sell_trades) == 1
     assert sell_trades[0]["quantity"] == 10
     assert sell_trades[0]["reason"] == "TAKE_PROFIT"
+
+
+@pytest.mark.parametrize("age_hours", [9.0, 12.0])
+def test_stale_signal_is_cancelled_not_rejuvenated(test_pipeline_env, age_hours):
+    """9~13시간 경과한 스테일 신호가 취소되는지 검증 (회귀 방지).
+
+    과거 auto_trader에는 'age_hours >= 8.5면 9시간 차감'하는 UTC 보정 휴리스틱이 있었는데,
+    created_at이 KST로 기록되도록 근본 수정된 뒤에는 이 보정이 진짜 오래된 신호를
+    0~4시간으로 '회춘'시켜 SIGNAL_MAX_AGE_HOURS(4h) 가드를 무력화했다.
+    이 테스트는 그 보정이 다시 들어오면 실패한다.
+    """
+    repo, adapter, mock_tg = test_pipeline_env
+
+    sig_id = repo.save_trade_signal(
+        ticker="005930", name="삼성전자", action="BUY", quantity=10,
+        reason="STALE_TEST", status="PENDING", broker_id="KIWOOM",
+    )
+
+    # created_at을 KST 기준 age_hours 시간 전으로 조작
+    stale_kst = datetime.now(timezone(timedelta(hours=9))) - timedelta(hours=age_hours)
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute(
+            "UPDATE trade_signals SET created_at = ? WHERE id = ?",
+            (stale_kst.strftime("%Y-%m-%d %H:%M:%S"), sig_id),
+        )
+        conn.commit()
+
+    initial_history_len = len(repo.get_trades_on_date(""))
+
+    process_pending_signals()
+
+    # 스테일 신호는 체결되지 않아야 한다
+    assert len(repo.get_trades_on_date("")) == initial_history_len
+    assert not any(s["id"] == sig_id for s in repo.get_pending_signals())
+
+
+def test_fresh_signal_is_not_cancelled(test_pipeline_env):
+    """신선한 신호(1시간 경과)는 만료 처리되지 않고 정상 체결되어야 한다."""
+    repo, adapter, mock_tg = test_pipeline_env
+
+    sig_id = repo.save_trade_signal(
+        ticker="005930", name="삼성전자", action="BUY", quantity=10,
+        reason="FRESH_TEST", status="PENDING", broker_id="KIWOOM",
+    )
+
+    fresh_kst = datetime.now(timezone(timedelta(hours=9))) - timedelta(hours=1)
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute(
+            "UPDATE trade_signals SET created_at = ? WHERE id = ?",
+            (fresh_kst.strftime("%Y-%m-%d %H:%M:%S"), sig_id),
+        )
+        conn.commit()
+
+    process_pending_signals()
+
+    history = repo.get_trades_on_date("")
+    assert any(t["ticker"] == "005930" and t["reason"] == "FRESH_TEST" for t in history)
 
 
 def test_order_failure_does_not_create_trade_history(test_pipeline_env):

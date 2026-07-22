@@ -21,6 +21,19 @@ import time
 from functools import wraps
 
 
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst_str() -> str:
+    """현재 시각을 KST 문자열로 반환한다.
+
+    스키마 기본값 datetime('now','localtime')은 서버 TZ에 의존해(운영 서버는 UTC)
+    KST를 쓰는 애플리케이션 로직과 9시간 어긋난다. 시각 비교에 쓰이는 컬럼은
+    이 헬퍼로 KST를 명시 기록해 기본값에 의존하지 않는다.
+    """
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _is_lock_error(e: Exception) -> bool:
     """sqlite3.OperationalError 중 'database is locked' 또는 'database is busy' 에러인지 검증합니다."""
     if isinstance(e, sqlite3.OperationalError):
@@ -438,7 +451,7 @@ class DbRepository:
     @with_db_retry()
     def save_trade_signal(self, ticker: str, name: str, action: str, quantity: int, reason: str, status: str = 'PENDING', broker_id: str = 'KIWOOM', features: str = None) -> int:
         """신규 트레이딩 시그널을 이력과 함께 삽입 (과거 데이터 보존 가능)"""
-        created_at_kst = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
+        created_at_kst = now_kst_str()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -635,12 +648,17 @@ class DbRepository:
 
     @with_db_retry()
     def save_trade_history(self, ticker: str, name: str, side: str, quantity: int, price: int, amt: int, reason: str, features: str = None):
-        """체결 이력 저장"""
+        """체결 이력 저장.
+
+        timestamp는 KST로 명시 기록한다 — get_last_buy_timestamp를 거쳐
+        _is_within_min_holding(BULL 14일/기타 7일 최소 보유 판정)의 경과일 계산에
+        쓰이므로 스키마 기본값(서버 TZ 의존)에 맡기면 국면별 그레이스가 하루 어긋날 수 있다.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (ticker, name, side, quantity, price, amt, reason, features))
+                "INSERT INTO trade_history (ticker, name, side, quantity, price, amt, reason, features, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticker, name, side, quantity, price, amt, reason, features, now_kst_str()))
 
     @with_db_retry()
     def get_last_buy_timestamp(self, ticker: str):

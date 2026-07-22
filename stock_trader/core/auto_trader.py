@@ -537,13 +537,15 @@ def process_pending_signals():
                 continue
 
             try:
+                # created_at은 save_trade_signal이 KST로 명시 기록한다 (d9652a8에서 근본 수정).
+                # 과거엔 UTC로 저장돼 9시간 시차가 났고 이를 보정하는 휴리스틱이 있었는데,
+                # 근본 원인이 해소된 지금은 그 보정이 오히려 '진짜로 오래된 신호'의 경과시간을
+                # 9시간 깎아 신선도 가드를 통과시키는 구멍이 되므로 제거했다.
+                # 만에 하나 남아있는 레거시 UTC 행은 실제보다 오래된 것으로 계산되어
+                # 취소되는 방향(fail-closed)이라 안전하다.
                 created_at = datetime.strptime(str(sig['created_at'])[:19], "%Y-%m-%d %H:%M:%S")
                 now_kst_naive = now.replace(tzinfo=None)
                 age_hours = (now_kst_naive - created_at).total_seconds() / 3600.0
-                if age_hours >= 8.5:
-                    age_hours = max(0.0, age_hours - 9.0)
-                elif age_hours < 0:
-                    age_hours = max(0.0, age_hours + 9.0)
                 if age_hours > SIGNAL_MAX_AGE_HOURS:
                     logger.warning(f"⏭️ [신호 만료] {sig['name']}: 생성 후 {age_hours:.1f}시간 경과 (한도 {SIGNAL_MAX_AGE_HOURS}h) — 매수 취소")
                     get_repo().cancel_signal(sig['id'], f"신선도 만료 ({age_hours:.1f}h)")
