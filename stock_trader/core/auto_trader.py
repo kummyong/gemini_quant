@@ -486,6 +486,214 @@ def risk_monitor_loop():
             logger.exception(f"❌ 리스크 감시 스레드 오류: {e}")
             time.sleep(30)
 
+def process_pending_signals():
+    """DB의 PENDING 상태 매매 신호를 읽어 스마트 조건 검증 후 주문을 집행합니다."""
+    signals = get_repo().get_pending_signals()
+    if not signals:
+        return
+
+    now = datetime.now(KST)
+    logger.info(f"🧠 {len(signals)}개의 매매 신호 분석 중...")
+
+    broker_apis = {}
+    broker_cash = {}
+    pending_buy_counts = {}
+    for s in signals:
+        if s['action'] == 'BUY':
+            b = s['broker_id'] if s.get('broker_id') else "KIWOOM"
+            pending_buy_counts[b] = pending_buy_counts.get(b, 0) + 1
+
+    for sig in signals:
+        broker_id = sig['broker_id'] if 'broker_id' in sig.keys() and sig['broker_id'] else "KIWOOM"
+        
+        if broker_id not in broker_apis:
+            try:
+                api = BrokerFactory.get_broker(broker_id)
+                broker_apis[broker_id] = api
+                account = api.get_account_summary()
+                if account:
+                    output = account.get("output") if isinstance(account.get("output"), dict) else account
+                    broker_cash[broker_id] = float(output.get("prsm_dpst_aset_amt", 0))
+                    logger.info(f"💰 [{broker_id}] 현재 예수금: {broker_cash[broker_id]:,.0f}원")
+            except Exception as e:
+                logger.warning(f"⚠️ [{broker_id}] API/예수금 조회 실패: {e}")
+                broker_apis[broker_id] = None
+                broker_cash[broker_id] = 0.0
+                
+        api = broker_apis[broker_id]
+        available_cash = broker_cash.get(broker_id, 0.0)
+        
+        if not api:
+            logger.warning(f"⚠️ [{broker_id}] API를 불러올 수 없어 {sig['name']} 주문 스킵")
+            continue
+
+        qty = int(sig['quantity']) if sig['quantity'] is not None and int(sig['quantity']) > 0 else 1
+        
+        if sig['action'] == 'BUY':
+            remaining_buys = max(1, pending_buy_counts.get(broker_id, 1))
+            pending_buy_counts[broker_id] = remaining_buys - 1
+            if market_halt:
+                logger.warning(f"⏭️ [매수 보류] {sig['name']}: 시장 서킷 브레이커 작동 중으로 매수 스킵")
+                continue
+
+            try:
+                created_at = datetime.strptime(str(sig['created_at'])[:19], "%Y-%m-%d %H:%M:%S")
+                now_kst_naive = now.replace(tzinfo=None)
+                age_hours = (now_kst_naive - created_at).total_seconds() / 3600.0
+                if age_hours >= 8.5:
+                    age_hours = max(0.0, age_hours - 9.0)
+                elif age_hours < 0:
+                    age_hours = max(0.0, age_hours + 9.0)
+                if age_hours > SIGNAL_MAX_AGE_HOURS:
+                    logger.warning(f"⏭️ [신호 만료] {sig['name']}: 생성 후 {age_hours:.1f}시간 경과 (한도 {SIGNAL_MAX_AGE_HOURS}h) — 매수 취소")
+                    get_repo().cancel_signal(sig['id'], f"신선도 만료 ({age_hours:.1f}h)")
+                    continue
+            except (KeyError, IndexError, ValueError, TypeError):
+                pass
+                
+            try:
+                current_price = api.get_current_price(sig['ticker'])
+                if current_price <= 0:
+                    logger.warning(f"⚠️ [{sig['name']}] 현재가 조회 실패 — 매수 보류 (다음 루프에서 재시도)")
+                    continue
+
+                target_price = None
+                if "TARGET_PRICE:" in sig['reason']:
+                    try:
+                        target_price = float(sig['reason'].split("TARGET_PRICE:")[1].split()[0])
+                    except:
+                        pass
+                
+                if target_price and current_price > 0:
+                    is_target_reached = current_price <= target_price * 1.005
+                    is_late_afternoon = now.hour > 14 or (now.hour == 14 and now.minute >= 30)
+
+                    if not is_target_reached and not is_late_afternoon:
+                        logger.info(f"⏳ [눌림목 대기] {sig['name']}: 현재가 {current_price:,.0f}원 > 목표가 {target_price:,.0f}원 (14시 30분 이후 자동체결 대기)")
+                        continue
+                    elif is_late_afternoon and not is_target_reached:
+                        max_chase_pct = get_hyperparams()["MAX_CHASE_PCT"]
+                        chase_pct = (current_price - target_price) / target_price * 100.0
+                        if chase_pct > max_chase_pct:
+                            logger.info(f"⛔ [추격 상한 초과] {sig['name']}: 현재가 {current_price:,.0f}원 = 목표가 대비 {chase_pct:+.2f}% (허용 {max_chase_pct:.1f}%) — 매수 보류")
+                            continue
+                        logger.info(f"⏰ [마감 임박 집행] {sig['name']}: 목표가 대비 {chase_pct:+.2f}% 추격 허용 범위 내 — 현재가 {current_price:,.0f}원 매수 집행")
+                    else:
+                        logger.info(f"🎯 [목표가 터치 진입] {sig['name']}: 현재가 {current_price:,.0f}원 <= 목표가 {target_price:,.0f}원 만족")
+                
+                if current_price > 0:
+                    estimated_cost = qty * current_price
+                    if estimated_cost > available_cash:
+                        fair_cash = available_cash / remaining_buys
+                        old_qty = qty
+                        qty = int(fair_cash * 0.95 / current_price)
+                        if qty <= 0:
+                            logger.warning(f"⚠️ [{broker_id}] 예수금 부족으로 매수 스킵: {sig['name']} (필요: {estimated_cost:,.0f}원, 예수금: {available_cash:,.0f}원)")
+                            get_repo().cancel_signal(sig['id'], "예수금 부족")
+                            continue
+                        else:
+                            logger.info(f"📉 [{broker_id}] 수량 조정: {sig['name']} {old_qty}주 → {qty}주 (예수금 제한)")
+                            
+            except Exception as price_e:
+                logger.warning(f"⚠️ 스마트 매수 조건 검증 실패 ({sig['ticker']}) — 매수 보류 (다음 루프에서 재시도): {price_e}")
+                continue
+        
+        if sig['action'] == 'BUY':
+            est_price = current_price
+        else:
+            try:
+                est_price = float(api.get_current_price(sig['ticker']))
+            except Exception:
+                est_price = 0.0
+
+        logger.info(f"🛒 [{broker_id}] 주문 요청: {sig['name']} ({sig['ticker']}) - {sig['action']} {qty}주")
+        res = api.place_order(sig['ticker'], qty, 0, side=sig['action'])
+        
+        logger.info(f"📡 API 응답: {res}")
+        
+        is_success = False
+        if res:
+            if res.get("return_code") == 0 or res.get("status") == "success" or res.get("rt_cd") == "0":
+                is_success = True
+        
+        if is_success:
+            logger.info(f"✅ 주문 접수 성공: {sig['name']}")
+
+            if sig['action'] == 'BUY':
+                fill_price = estimate_fill_price(api, sig['ticker'], est_price)
+                broker_cash[broker_id] = max(0.0, broker_cash[broker_id] - qty * fill_price)
+            else:
+                fill_price = est_price
+
+            try:
+                get_repo().complete_signal(sig['id'])
+                get_repo().save_trade_history(sig['ticker'], sig['name'], sig['action'], qty, int(fill_price), int(fill_price * qty), sig['reason'], sig['features'])
+                logger.info(f"✅ DB 기록 완료: {sig['name']} (체결단가 추정: {fill_price:,.0f}원)")
+
+                if sig['action'] == 'BUY':
+                    get_repo().record_position_entry(
+                        broker_id=broker_id, stk_cd=sig['ticker'], stk_nm=sig['name'],
+                        entry_price=fill_price, entry_signal_type=parse_entry_signal_type(sig['reason']),
+                        entry_features=sig['features'])
+                else:
+                    exit_reason = "unknown"
+                    try:
+                        if sig['features']:
+                            exit_reason = json.loads(sig['features']).get("exit_reason", exit_reason)
+                    except Exception:
+                        pass
+                    if exit_reason == "overshooting_partial":
+                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
+                                                exit_reason, qty, position_closed=False)
+                    else:
+                        filled_qty, is_full_close = apply_sell_result(
+                            broker_id, sig['ticker'], sig['name'], qty, api, fill_price, exit_reason)
+                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
+                                                exit_reason, filled_qty, position_closed=is_full_close)
+
+                action_emoji = "🟢" if sig['action'] == "BUY" else "🔴"
+                action_text = "매수" if sig['action'] == "BUY" else "매도"
+                trade_msg = (
+                    f"{action_emoji} *[{action_text} 체결]*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
+                    f"🔢 *수량:* {qty:,}주\n"
+                    f"💵 *단가:* 약 {fill_price:,.0f}원 (시장가, 계좌 재조회 기준)\n"
+                    f"📋 *사유:* {sig['reason']}\n"
+                    f"⏰ *시각:* {datetime.now(KST).strftime('%H:%M:%S')}\n"
+                    f"━━━━━━━━━━━━━━"
+                )
+                try:
+                    send_telegram_message(trade_msg)
+                except Exception as tg_e:
+                    logger.warning(f"텔레그램 알림 전송 실패 (매매는 정상 처리됨): {tg_e}")
+            except Exception as db_e:
+                logger.exception(f"❌ DB 업데이트 실패: {db_e}")
+        else:
+            fail_reason = str(res.get('return_msg', '')) if res else 'No response'
+            logger.warning(f"⚠️ 주문 실패: {sig['name']} - {fail_reason}")
+            try:
+                get_repo().cancel_signal(sig['id'], f"실패: {fail_reason[:100]}")
+                logger.info(f"📝 FAILED 상태 업데이트 완료: {sig['name']}")
+            except Exception as db_e:
+                logger.exception(f"❌ FAILED 상태 DB 업데이트 실패: {db_e}")
+            
+            fail_msg = (
+                f"⚠️ *[주문 실패]*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
+                f"🔢 *수량:* {qty:,}주\n"
+                f"📡 *사유:* {fail_reason[:200]}\n"
+                f"━━━━━━━━━━━━━━"
+            )
+            try:
+                send_telegram_message(fail_msg)
+            except Exception as tg_e:
+                logger.warning(f"실패 알림 전송 실패: {tg_e}")
+        
+        time.sleep(2)
+
+
 def run_trade():
     global last_circuit_breaker_check, market_halt
     logger.info("🚀 [KST 정밀 매매 엔진] 가동 시작 (다중 증권사 지원)")
@@ -546,230 +754,8 @@ def run_trade():
                 
                 # (보유 종목 Trailing/Hard Stop 감시는 전용 스레드 risk_monitor_loop에서 수행)
 
-                # 3. 매매 신호 로드
-                signals = get_repo().get_pending_signals()
-                
-                if signals:
-                    logger.info(f"🧠 {len(signals)}개의 매매 신호 분석 중...")
-
-                    broker_apis = {}
-                    broker_cash = {}
-                    # 브로커별 미처리 BUY 신호 수 — 예수금 부족 시 남은 신호들과 공평 분할하기 위함
-                    pending_buy_counts = {}
-                    for s in signals:
-                        if s['action'] == 'BUY':
-                            b = s['broker_id'] if s.get('broker_id') else "KIWOOM"
-                            pending_buy_counts[b] = pending_buy_counts.get(b, 0) + 1
-
-                    for sig in signals:
-                        broker_id = sig['broker_id'] if 'broker_id' in sig.keys() and sig['broker_id'] else "KIWOOM"
-                        
-                        # API 초기화 및 예수금 캐싱 (해당 루프 내 1회)
-                        if broker_id not in broker_apis:
-                            try:
-                                api = BrokerFactory.get_broker(broker_id)
-                                broker_apis[broker_id] = api
-                                account = api.get_account_summary()
-                                if account:
-                                    output = account.get("output") if isinstance(account.get("output"), dict) else account
-                                    broker_cash[broker_id] = float(output.get("prsm_dpst_aset_amt", 0))
-                                    logger.info(f"💰 [{broker_id}] 현재 예수금: {broker_cash[broker_id]:,.0f}원")
-                            except Exception as e:
-                                logger.warning(f"⚠️ [{broker_id}] API/예수금 조회 실패: {e}")
-                                broker_apis[broker_id] = None
-                                broker_cash[broker_id] = 0.0
-                                
-                        api = broker_apis[broker_id]
-                        available_cash = broker_cash.get(broker_id, 0.0)
-                        
-                        if not api:
-                            logger.warning(f"⚠️ [{broker_id}] API를 불러올 수 없어 {sig['name']} 주문 스킵")
-                            continue
-
-                        qty = int(sig['quantity']) if sig['quantity'] is not None and int(sig['quantity']) > 0 else 1
-                        
-                        # BUY 주문 시 추가 필터링 및 스마트 주문 집행
-                        if sig['action'] == 'BUY':
-                            remaining_buys = max(1, pending_buy_counts.get(broker_id, 1))
-                            pending_buy_counts[broker_id] = remaining_buys - 1
-                            if market_halt:
-                                logger.warning(f"⏭️ [매수 보류] {sig['name']}: 시장 서킷 브레이커 작동 중으로 매수 스킵")
-                                continue
-
-                            # 신호 신선도 검사: 종가 베팅(15:00) 신호가 당일 장 마감까지 체결되지 못하고
-                            # 다음날 아침 시가에 스테일 가격으로 집행되는 것을 방지
-                            try:
-                                created_at = datetime.strptime(str(sig['created_at'])[:19], "%Y-%m-%d %H:%M:%S")
-                                now_kst_naive = now.replace(tzinfo=None)
-                                age_hours = (now_kst_naive - created_at).total_seconds() / 3600.0
-                                # DB에 UTC 기준 생성시각이 저장되어 KST(now)와 9시간 시차가 발생하는 경우 정정
-                                if age_hours >= 8.5:
-                                    age_hours = max(0.0, age_hours - 9.0)
-                                elif age_hours < 0:
-                                    age_hours = max(0.0, age_hours + 9.0)
-                                if age_hours > SIGNAL_MAX_AGE_HOURS:
-                                    logger.warning(f"⏭️ [신호 만료] {sig['name']}: 생성 후 {age_hours:.1f}시간 경과 (한도 {SIGNAL_MAX_AGE_HOURS}h) — 매수 취소")
-                                    get_repo().cancel_signal(sig['id'], f"신선도 만료 ({age_hours:.1f}h)")
-                                    continue
-                            except (KeyError, IndexError, ValueError, TypeError):
-                                pass  # created_at 파싱 불가 시 기존 동작 유지
-                                
-                            # 스마트 분할 매수 / 눌림목 대기 로직 적용
-                            try:
-                                current_price = api.get_current_price(sig['ticker'])
-                                if current_price <= 0:
-                                    logger.warning(f"⚠️ [{sig['name']}] 현재가 조회 실패 — 매수 보류 (다음 루프에서 재시도)")
-                                    continue
-
-                                target_price = None
-                                if "TARGET_PRICE:" in sig['reason']:
-                                    try:
-                                        target_price = float(sig['reason'].split("TARGET_PRICE:")[1].split()[0])
-                                    except:
-                                        pass
-                                
-                                # 스마트 매수 집행 판단:
-                                # 1. 타겟가(볼밴 하단) 이하로 내려오는 눌림목일 때 매수진입
-                                # 2. 장 마감 임박(14시 30분 이후)에는 목표가 미도달이어도 집행하되,
-                                #    추격 허용 폭(MAX_CHASE_PCT) 이내일 때만 — 엣지 없는 고가 추격 매수 방지
-                                if target_price and current_price > 0:
-                                    is_target_reached = current_price <= target_price * 1.005 # 0.5% 안전마진 이내
-                                    is_late_afternoon = now.hour > 14 or (now.hour == 14 and now.minute >= 30)
-
-                                    if not is_target_reached and not is_late_afternoon:
-                                        logger.info(f"⏳ [눌림목 대기] {sig['name']}: 현재가 {current_price:,.0f}원 > 목표가 {target_price:,.0f}원 (14시 30분 이후 자동체결 대기)")
-                                        continue
-                                    elif is_late_afternoon and not is_target_reached:
-                                        max_chase_pct = get_hyperparams()["MAX_CHASE_PCT"]
-                                        chase_pct = (current_price - target_price) / target_price * 100.0
-                                        if chase_pct > max_chase_pct:
-                                            logger.info(f"⛔ [추격 상한 초과] {sig['name']}: 현재가 {current_price:,.0f}원 = 목표가 대비 {chase_pct:+.2f}% (허용 {max_chase_pct:.1f}%) — 매수 보류")
-                                            continue
-                                        logger.info(f"⏰ [마감 임박 집행] {sig['name']}: 목표가 대비 {chase_pct:+.2f}% 추격 허용 범위 내 — 현재가 {current_price:,.0f}원 매수 집행")
-                                    else:
-                                        logger.info(f"🎯 [목표가 터치 진입] {sig['name']}: 현재가 {current_price:,.0f}원 <= 목표가 {target_price:,.0f}원 만족")
-                                
-                                # 예수금 최종 검증
-                                if current_price > 0:
-                                    estimated_cost = qty * current_price
-                                    if estimated_cost > available_cash:
-                                        # 잔여 예수금을 남은 매수 신호 수로 분할 — 앞 순번이 전부 가져가 뒤 순번이 굶는 것 방지
-                                        fair_cash = available_cash / remaining_buys
-                                        old_qty = qty
-                                        qty = int(fair_cash * 0.95 / current_price)  # 95% 안전마진
-                                        if qty <= 0:
-                                            logger.warning(f"⚠️ [{broker_id}] 예수금 부족으로 매수 스킵: {sig['name']} (필요: {estimated_cost:,.0f}원, 예수금: {available_cash:,.0f}원)")
-                                            get_repo().cancel_signal(sig['id'], "예수금 부족")
-                                            continue
-                                        else:
-                                            logger.info(f"📉 [{broker_id}] 수량 조정: {sig['name']} {old_qty}주 → {qty}주 (예수금 제한)")
-                                            
-                            except Exception as price_e:
-                                logger.warning(f"⚠️ 스마트 매수 조건 검증 실패 ({sig['ticker']}) — 매수 보류 (다음 루프에서 재시도): {price_e}")
-                                continue
-                        
-                        # 체결가 추정용 기준가 확보 (BUY는 위에서 조회한 현재가 사용)
-                        if sig['action'] == 'BUY':
-                            est_price = current_price
-                        else:
-                            try:
-                                est_price = float(api.get_current_price(sig['ticker']))
-                            except Exception:
-                                est_price = 0.0
-
-                        logger.info(f"🛒 [{broker_id}] 주문 요청: {sig['name']} ({sig['ticker']}) - {sig['action']} {qty}주")
-                        res = api.place_order(sig['ticker'], qty, 0, side=sig['action'])
-                        
-                        logger.info(f"📡 API 응답: {res}")
-                        
-                        is_success = False
-                        if res:
-                            if res.get("return_code") == 0 or res.get("status") == "success" or res.get("rt_cd") == "0":
-                                is_success = True
-                        
-                        if is_success:
-                            logger.info(f"✅ 주문 접수 성공: {sig['name']}")
-
-                            if sig['action'] == 'BUY':
-                                # 계좌 재조회로 실제 평균 매입단가 확인 (실패 시 주문 직전 현재가로 추정)
-                                fill_price = estimate_fill_price(api, sig['ticker'], est_price)
-                                # 예수금 차감 — 같은 루프의 다음 매수 신호가 이미 소진된 예수금을 중복 사용하지 않도록
-                                broker_cash[broker_id] = max(0.0, broker_cash[broker_id] - qty * fill_price)
-                            else:
-                                fill_price = est_price
-
-                            try:
-                                get_repo().complete_signal(sig['id'])
-                                get_repo().save_trade_history(sig['ticker'], sig['name'], sig['action'], qty, int(fill_price), int(fill_price * qty), sig['reason'], sig['features'])
-                                logger.info(f"✅ DB 기록 완료: {sig['name']} (체결단가 추정: {fill_price:,.0f}원)")
-
-                                # 학습 기반: 진입 시 팩터 스냅샷 기록 / 청산 시 진입 대비 실현 결과 기록
-                                if sig['action'] == 'BUY':
-                                    get_repo().record_position_entry(
-                                        broker_id=broker_id, stk_cd=sig['ticker'], stk_nm=sig['name'],
-                                        entry_price=fill_price, entry_signal_type=parse_entry_signal_type(sig['reason']),
-                                        entry_features=sig['features'])
-                                else:
-                                    exit_reason = "unknown"
-                                    try:
-                                        if sig['features']:
-                                            exit_reason = json.loads(sig['features']).get("exit_reason", exit_reason)
-                                    except Exception:
-                                        pass
-                                    # 오버슈팅 부분 익절(러너 전환)은 전략상 의도된 부분매도라 그대로 두고,
-                                    # 그 외(하드스탑/트레일링/교체/글로벌손절)는 전량 청산을 기대하는 주문이므로
-                                    # 접수 성공만으로 단정하지 않고 계좌 재조회로 실제 잔여 수량을 확인한다.
-                                    if exit_reason == "overshooting_partial":
-                                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
-                                                                exit_reason, qty, position_closed=False)
-                                    else:
-                                        filled_qty, is_full_close = apply_sell_result(
-                                            broker_id, sig['ticker'], sig['name'], qty, api, fill_price, exit_reason)
-                                        record_position_outcome(broker_id, sig['ticker'], sig['name'], fill_price,
-                                                                exit_reason, filled_qty, position_closed=is_full_close)
-
-                                # 텔레그램 매매 알림 전송
-                                action_emoji = "🟢" if sig['action'] == "BUY" else "🔴"
-                                action_text = "매수" if sig['action'] == "BUY" else "매도"
-                                trade_msg = (
-                                    f"{action_emoji} *[{action_text} 체결]*\n"
-                                    f"━━━━━━━━━━━━━━\n"
-                                    f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
-                                    f"🔢 *수량:* {qty:,}주\n"
-                                    f"💵 *단가:* 약 {fill_price:,.0f}원 (시장가, 계좌 재조회 기준)\n"
-                                    f"📋 *사유:* {sig['reason']}\n"
-                                    f"⏰ *시각:* {datetime.now(KST).strftime('%H:%M:%S')}\n"
-                                    f"━━━━━━━━━━━━━━"
-                                )
-                                try:
-                                    send_telegram_message(trade_msg)
-                                except Exception as tg_e:
-                                    logger.warning(f"텔레그램 알림 전송 실패 (매매는 정상 처리됨): {tg_e}")
-                            except Exception as db_e:
-                                logger.exception(f"❌ DB 업데이트 실패: {db_e}")
-                        else:
-                            fail_reason = str(res.get('return_msg', '')) if res else 'No response'
-                            logger.warning(f"⚠️ 주문 실패: {sig['name']} - {fail_reason}")
-                            try:
-                                get_repo().cancel_signal(sig['id'], f"실패: {fail_reason[:100]}")
-                                logger.info(f"📝 FAILED 상태 업데이트 완료: {sig['name']}")
-                            except Exception as db_e:
-                                logger.exception(f"❌ FAILED 상태 DB 업데이트 실패: {db_e}")
-                            
-                            fail_msg = (
-                                f"⚠️ *[주문 실패]*\n"
-                                f"━━━━━━━━━━━━━━\n"
-                                f"📌 *종목:* {sig['name']} ({sig['ticker']})\n"
-                                f"🔢 *수량:* {qty:,}주\n"
-                                f"📡 *사유:* {fail_reason[:200]}\n"
-                                f"━━━━━━━━━━━━━━"
-                            )
-                            try:
-                                send_telegram_message(fail_msg)
-                            except Exception as tg_e:
-                                logger.warning(f"실패 알림 전송 실패: {tg_e}")
-                        
-                        time.sleep(2) # 레이트 리밋 방지 (2초 대기)
+                # 3. 매매 신호 로드 및 집행
+                process_pending_signals()
                 
                 # 4. 계좌 요약 (주문 후 갱신)
                 try:
